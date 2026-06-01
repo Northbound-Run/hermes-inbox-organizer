@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Connect Gmail · Hermes Inbox Organizer</title>
+<style>
+  :root {
+    --bg: #0f1115; --card: #171a21; --fg: #e7e9ee; --muted: #9aa3b2;
+    --line: #272b35; --accent: #6ea8fe; --ok: #36c08a; --err: #f0716f;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f4f5f8; --card:#fff; --fg:#1b1f27; --muted:#5b6470; --line:#e3e6ec; --accent:#2f6fed; }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display: grid; place-items: center; padding: 24px;
+  }
+  .card {
+    width: 100%; max-width: 460px; background: var(--card);
+    border: 1px solid var(--line); border-radius: 14px; padding: 28px;
+    box-shadow: 0 10px 40px rgba(0,0,0,.25);
+  }
+  .brand { font-size: 13px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin: 0 0 18px; }
+  h1 { font-size: 20px; margin: 0 0 6px; }
+  p { color: var(--muted); margin: 0 0 18px; }
+  .code-wrap { display: none; }
+  .code-box {
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 16px; word-break: break-all; user-select: all; color: var(--fg);
+    max-height: 140px; overflow: auto;
+  }
+  button {
+    margin-top: 14px; width: 100%; padding: 12px 16px; border: 0; border-radius: 10px;
+    background: var(--accent); color: #fff; font-size: 15px; font-weight: 600; cursor: pointer;
+  }
+  button:active { transform: translateY(1px); }
+  .hint { font-size: 13px; margin-top: 16px; }
+  .status { display: none; }
+  .status.ok h1 { color: var(--ok); }
+  .status.err h1 { color: var(--err); }
+  .dot { color: var(--accent); }
+</style>
+</head>
+<body>
+  <main class="card" role="main">
+    <p class="brand">Hermes <span class="dot">·</span> Inbox Organizer</p>
+
+    <section id="success" class="status">
+      <h1>Almost done</h1>
+      <p>Copy this code and paste it back into your Hermes chat to finish connecting your inbox.</p>
+      <div class="code-wrap" style="display:block">
+        <div id="code" class="code-box" aria-label="Authorization code"></div>
+        <button id="copy" type="button">Copy code</button>
+      </div>
+      <p class="hint">This code is single-use and expires in a few minutes. You can close this tab after pasting.</p>
+    </section>
+
+    <section id="error" class="status err">
+      <h1>Connection cancelled</h1>
+      <p id="error-msg">The connection wasn’t completed.</p>
+      <p class="hint">Start again from your Hermes chat when you’re ready.</p>
+    </section>
+
+    <section id="idle" class="status">
+      <h1>Connect Gmail to Hermes</h1>
+      <p>This page finishes connecting a Gmail account. Start the flow from your Hermes chat — it will send you here automatically.</p>
+    </section>
+  </main>
+
+<script>
+(function () {
+  "use strict";
+  var params = new URLSearchParams(location.search);
+  var code = params.get("code");
+  var error = params.get("error");
+  var errorDesc = params.get("error_description");
+
+  // Don't leave the auth code sitting in the address bar / history.
+  if (location.search) {
+    try { history.replaceState(null, "", location.pathname); } catch (e) {}
+  }
+
+  function show(id) {
+    var el = document.getElementById(id);
+    if (el) el.style.display = "block";
+  }
+
+  if (error) {
+    var msg = document.getElementById("error-msg");
+    msg.textContent = "Reason: " + (errorDesc || error);
+    show("error");
+    return;
+  }
+
+  if (code) {
+    document.getElementById("code").textContent = code; // textContent: no HTML injection
+    show("success");
+    var btn = document.getElementById("copy");
+    btn.addEventListener("click", function () {
+      var done = function () { btn.textContent = "Copied ✓"; setTimeout(function () { btn.textContent = "Copy code"; }, 1800); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(code).then(done, selectFallback);
+      } else {
+        selectFallback();
+      }
+    });
+    return;
+  }
+
+  show("idle");
+
+  function selectFallback() {
+    var box = document.getElementById("code");
+    var range = document.createRange();
+    range.selectNodeContents(box);
+    var sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    try { document.execCommand("copy"); } catch (e) {}
+  }
+})();
+</script>
+</body>
+</html>

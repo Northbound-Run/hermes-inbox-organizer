@@ -1,0 +1,29 @@
+name: inbox_organizer
+version: 0.1.0
+description: "Autonomous Gmail triage + Hermes-drafted replies, as an in-process Hermes plugin."
+author: Matthew Hall
+license: MIT
+kind: standalone
+
+# Tools surfaced to the agent.
+provides_tools:
+  - inbox_create_draft
+
+# Hooks the plugin registers (validated against hermes_cli/plugins.py VALID_HOOKS).
+provides_hooks:
+  - pre_llm_call
+
+# Live build env (kept out of register() — seams keep it credential-free for tests/CI).
+requires_env:
+  - name: GOOGLE_PROJECT_ID
+    description: "GCP project hosting the Gmail Pub/Sub topic + subscription."
+  - name: PUBSUB_SUBSCRIPTION_ID
+    description: "Pub/Sub subscription consumed via streaming pull (no webhook)."
+  - name: HERMES_URL
+    description: "Base URL of the local Hermes OpenAI-compatible endpoint (draft trigger)."
+    url: "https://hermes-agent.nousresearch.com/"
+  - name: HERMES_MODEL
+    description: "Instance/model name the endpoint answers to."
+optional_env:
+  HERMES_API_KEY:
+    description: "Bearer token for the Hermes endpoint, if the deployment requires one."

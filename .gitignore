@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Virtualenvs / tooling caches
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Node / Cloudflare (oauth-callback tooling)
+node_modules/
+.wrangler/
+
+# Env / secrets — never commit credentials
+.env
+.env.local
+*.key
+*.pem
+
+# Local state / data
+*.db
+*.db-shm
+*.db-wal
+data/
+.DS_Store
+
+# Agent scratch (oh-my-claudecode)
+.omc/

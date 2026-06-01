@@ -1,0 +1,38 @@
+[project]
+name = "hermes-inbox-organizer"
+version = "0.1.0"
+description = "Autonomous Gmail triage as an in-process Hermes plugin"
+requires-python = ">=3.11"
+dependencies = [
+  "cryptography>=42",  # token-at-rest encryption (lazy-imported)
+]
+
+[project.optional-dependencies]
+# Live Gmail/Pub/Sub path — not needed to run the unit tests (imports are lazy).
+live = [
+  "google-cloud-pubsub>=2.0",
+  "google-api-python-client>=2.0",
+  "google-auth>=2.0",
+  "google-auth-oauthlib>=1.0",  # InstalledAppFlow for `connect`
+  "openai>=1.0",  # OpenRouter classifier client
+]
+dev = ["pytest>=8.0"]
+
+# Hermes discovers the plugin via this entry-point group (module path only,
+# no ":register" suffix) — i.e. `pip install` makes it auto-loadable.
+[project.entry-points."hermes_agent.plugins"]
+inbox_organizer = "hermes_inbox_organizer"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["hermes_inbox_organizer"]
+
+[tool.setuptools.package-data]
+hermes_inbox_organizer = ["plugin.yaml"]

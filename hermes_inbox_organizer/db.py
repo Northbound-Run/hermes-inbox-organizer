@@ -1,0 +1,245 @@
+"""SQLite persistence — connection, schema, and typed accessors.
+
+Replaces the earlier flat-file state (``cursor-<email>.txt`` history cursors and
+the ``drafted-threads.txt`` draft ledger) with one SQLite DB, and adds the
+operational tables the rest of the hardening work needs (classified messages,
+thread state). The DB lives at ``<INBOX_DATA_DIR>/state.db`` — inside the Hermes
+``/opt/data`` volume, so it persists across restarts / ``docker compose up``.
+
+Connection handling mirrors Hermes's own SQLite plugins (``hermes_cli/kanban_db``):
+autocommit (``isolation_level=None``), ``sqlite3.Row`` rows, WAL + ``foreign_keys=ON``,
+and an idempotent ``CREATE TABLE IF NOT EXISTS`` init cached per path. The
+``BEGIN IMMEDIATE`` write-lock pattern kanban uses for task claiming is the same
+one the future DB-backed per-account job queue/leasing will use.
+
+The module is pure stdlib ``sqlite3`` so the unit tests run without Hermes.
+Single-owner design: tables are keyed by ``account`` (the email) — there is no
+users/auth table (the agent is owner-gated) and labels stay code constants.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+import time
+from pathlib import Path
+from typing import Optional
+
+from .config import get_config
+
+_SCHEMA_VERSION = 1
+
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS accounts (
+    account                   TEXT PRIMARY KEY,            -- email; the per-account key everywhere
+    history_cursor            TEXT,                        -- Gmail history id (was cursor-<email>.txt)
+    watch_expiration_ms       INTEGER,
+    last_pull_at_ms           INTEGER,
+    paused                    INTEGER NOT NULL DEFAULT 0,
+    paused_reason             TEXT,
+    openrouter_consent_at_ms  INTEGER,
+    cost_usd_micros_today     INTEGER NOT NULL DEFAULT 0,
+    cost_window_start_ms      INTEGER,
+    updated_at_ms             INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS draft_requests (
+    account         TEXT NOT NULL,
+    thread_id       TEXT NOT NULL,
+    gmail_draft_id  TEXT,                                  -- set once the draft is created (idempotency)
+    created_at_ms   INTEGER NOT NULL,
+    PRIMARY KEY (account, thread_id)
+);
+
+CREATE TABLE IF NOT EXISTS classified_messages (
+    account              TEXT NOT NULL,
+    message_id           TEXT NOT NULL,
+    thread_id            TEXT NOT NULL,
+    from_addr            TEXT NOT NULL DEFAULT '',
+    subject              TEXT NOT NULL DEFAULT '',
+    category             TEXT NOT NULL,
+    confidence           INTEGER NOT NULL DEFAULT 0,
+    source               TEXT NOT NULL DEFAULT 'llm',      -- 'pre' | 'llm'
+    llm_input_tokens     INTEGER,
+    llm_output_tokens    INTEGER,
+    llm_cost_usd_micros  INTEGER,
+    classified_at_ms     INTEGER NOT NULL,
+    PRIMARY KEY (account, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_cm_account_classified_at ON classified_messages (account, classified_at_ms);
+CREATE INDEX IF NOT EXISTS idx_cm_account_thread        ON classified_messages (account, thread_id);
+
+CREATE TABLE IF NOT EXISTS thread_state (
+    account               TEXT NOT NULL,
+    thread_id             TEXT NOT NULL,
+    last_message_id       TEXT NOT NULL,
+    last_category         TEXT NOT NULL,
+    last_processed_at_ms  INTEGER NOT NULL,
+    PRIMARY KEY (account, thread_id)
+);
+"""
+
+_INITIALIZED_PATHS: set[str] = set()
+
+
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def default_db_path() -> Path:
+    return Path(get_config().db_path)
+
+
+def _apply_wal(conn: sqlite3.Connection) -> None:
+    # WAL lets the daemon read while a writer holds the lock. On a WAL-incompatible
+    # filesystem (NFS/SMB/FUSE) SQLite silently keeps the existing journal mode —
+    # correctness is unaffected, only write concurrency degrades, so we don't fail.
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError:
+        pass
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version >= _SCHEMA_VERSION:
+        return
+    # v1 is the base schema in SCHEMA_SQL (already applied by the caller). Future
+    # additive migrations go here, gated on `version`, then bump _SCHEMA_VERSION:
+    #   if version < 2: conn.execute("ALTER TABLE accounts ADD COLUMN ...")
+    conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+
+
+def connect(db_path: Optional[Path | str] = None) -> sqlite3.Connection:
+    """Open (and on first touch, initialize) the plugin DB.
+
+    The first connection to a given path runs the schema + migrations; later
+    connections to the same path in this process skip it via a module cache.
+    """
+    path = Path(db_path) if db_path is not None else default_db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    resolved = str(path.resolve())
+    needs_init = resolved not in _INITIALIZED_PATHS
+
+    conn = sqlite3.connect(str(path), isolation_level=None, timeout=30)
+    conn.row_factory = sqlite3.Row
+    _apply_wal(conn)
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+
+    if needs_init:
+        conn.executescript(SCHEMA_SQL)
+        _migrate(conn)
+        _INITIALIZED_PATHS.add(resolved)
+    return conn
+
+
+# ── Accounts: history cursor (replaces cursor-<email>.txt) ──────────────────────
+
+def get_cursor(conn: sqlite3.Connection, account: str) -> Optional[str]:
+    row = conn.execute(
+        "SELECT history_cursor FROM accounts WHERE account = ?", (account,)
+    ).fetchone()
+    return row["history_cursor"] if row and row["history_cursor"] is not None else None
+
+
+def set_cursor(conn: sqlite3.Connection, account: str, history_id: str) -> None:
+    conn.execute(
+        """INSERT INTO accounts (account, history_cursor, updated_at_ms)
+                VALUES (?, ?, ?)
+           ON CONFLICT(account) DO UPDATE SET history_cursor = excluded.history_cursor,
+                                              updated_at_ms  = excluded.updated_at_ms""",
+        (account, history_id, now_ms()),
+    )
+
+
+# ── Draft requests (replaces the drafted-threads.txt ledger) ────────────────────
+
+def draft_already_requested(conn: sqlite3.Connection, account: str, thread_id: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM draft_requests WHERE account = ? AND thread_id = ?",
+        (account, thread_id),
+    ).fetchone() is not None
+
+
+def mark_draft_requested(conn: sqlite3.Connection, account: str, thread_id: str) -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO draft_requests (account, thread_id, created_at_ms) VALUES (?, ?, ?)",
+        (account, thread_id, now_ms()),
+    )
+
+
+def set_draft_id(conn: sqlite3.Connection, account: str, thread_id: str, gmail_draft_id: str) -> None:
+    """Record the created Gmail draft id (durable idempotency past the request mark)."""
+    conn.execute(
+        """INSERT INTO draft_requests (account, thread_id, gmail_draft_id, created_at_ms)
+                VALUES (?, ?, ?, ?)
+           ON CONFLICT(account, thread_id) DO UPDATE SET gmail_draft_id = excluded.gmail_draft_id""",
+        (account, thread_id, gmail_draft_id, now_ms()),
+    )
+
+
+# ── Classified messages ─────────────────────────────────────────────────────────
+
+def record_classified_message(
+    conn: sqlite3.Connection,
+    *,
+    account: str,
+    message_id: str,
+    thread_id: str,
+    category: str,
+    from_addr: str = "",
+    subject: str = "",
+    confidence: int = 0,
+    source: str = "llm",
+    llm_input_tokens: Optional[int] = None,
+    llm_output_tokens: Optional[int] = None,
+    llm_cost_usd_micros: Optional[int] = None,
+) -> None:
+    """Upsert a message's classification (idempotent on re-processing)."""
+    conn.execute(
+        """INSERT INTO classified_messages
+               (account, message_id, thread_id, from_addr, subject, category, confidence,
+                source, llm_input_tokens, llm_output_tokens, llm_cost_usd_micros, classified_at_ms)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(account, message_id) DO UPDATE SET
+               thread_id           = excluded.thread_id,
+               from_addr           = excluded.from_addr,
+               subject             = excluded.subject,
+               category            = excluded.category,
+               confidence          = excluded.confidence,
+               source              = excluded.source,
+               llm_input_tokens    = excluded.llm_input_tokens,
+               llm_output_tokens   = excluded.llm_output_tokens,
+               llm_cost_usd_micros = excluded.llm_cost_usd_micros,
+               classified_at_ms    = excluded.classified_at_ms""",
+        (account, message_id, thread_id, from_addr, subject, category, confidence,
+         source, llm_input_tokens, llm_output_tokens, llm_cost_usd_micros, now_ms()),
+    )
+
+
+# ── Thread state ────────────────────────────────────────────────────────────────
+
+def upsert_thread_state(
+    conn: sqlite3.Connection,
+    *,
+    account: str,
+    thread_id: str,
+    last_message_id: str,
+    last_category: str,
+) -> None:
+    conn.execute(
+        """INSERT INTO thread_state (account, thread_id, last_message_id, last_category, last_processed_at_ms)
+                VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(account, thread_id) DO UPDATE SET
+               last_message_id      = excluded.last_message_id,
+               last_category        = excluded.last_category,
+               last_processed_at_ms = excluded.last_processed_at_ms""",
+        (account, thread_id, last_message_id, last_category, now_ms()),
+    )
+
+
+def get_thread_state(conn: sqlite3.Connection, account: str, thread_id: str) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM thread_state WHERE account = ? AND thread_id = ?",
+        (account, thread_id),
+    ).fetchone()

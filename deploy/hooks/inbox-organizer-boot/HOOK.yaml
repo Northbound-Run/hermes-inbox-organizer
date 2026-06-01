@@ -1,0 +1,7 @@
+name: inbox-organizer-boot
+description: >-
+  Load hermes_agent.plugins entry-point plugins at gateway startup so the
+  inbox-organizer Pub/Sub triage daemon starts immediately, instead of staying
+  dormant until the first agent turn after a restart / docker compose up.
+events:
+  - gateway:startup

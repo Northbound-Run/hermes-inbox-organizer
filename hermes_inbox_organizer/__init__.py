@@ -318,16 +318,24 @@ def _build_modules(notifier: DeliveryNotifier) -> list:
     resolver + auth-error predicate) injected, so the module stays decoupled.
     """
     from . import rollup as _rollup
+    from .config import get_config
     from .modules.rollup import RollupModule
+    from .modules.twofa import TwoFactorModule
 
     # Share the reconnect set BY REFERENCE so a dead token hit during a rollup
     # surfaces the same reconnect nudge as the runtime/onboarding paths.
     _rollup._NEEDS_RECONNECT = _NEEDS_RECONNECT
+    cfg = get_config()
     return [
         RollupModule(
             resolve_accounts=_resolve_rollup_accounts,
             is_auth_error=_is_auth_error_for_rollup,
-        )
+        ),
+        TwoFactorModule(
+            notifier=notifier,
+            enabled=cfg.module_2fa_enabled,
+            sender_allowlist=cfg.twofa_sender_allowlist,
+        ),
     ]
 
 

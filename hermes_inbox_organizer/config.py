@@ -47,6 +47,9 @@ class Config:
     # Notifications (proactive push to the owner — see notifier.py).
     # OPTIONAL override; default destination is Hermes's /sethome home channel.
     notify_target: Optional[str]  # INBOX_NOTIFY_TARGET: a room/chat id, e.g. "!room:server"
+    # Modules
+    module_2fa_enabled: bool  # INBOX_2FA_ENABLED (default on)
+    twofa_sender_allowlist: frozenset  # INBOX_2FA_SENDER_ALLOWLIST (lowercased addrs/domains; empty = push all)
 
     def token_path(self, safe_email: str) -> str:
         """Path to an account's encrypted token file (``accounts/<email>.json``)."""
@@ -58,6 +61,13 @@ def _env(name: str) -> Optional[str]:
     return val if val else None
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    return val.strip().lower() in ("1", "true", "yes", "on")
+
+
 @lru_cache(maxsize=1)
 def get_config() -> Config:
     config_dir = os.environ.get("INBOX_CONFIG_DIR", "/opt/data/config")
@@ -67,6 +77,11 @@ def get_config() -> Config:
         return os.environ.get(name) or os.path.join(config_dir, filename)
 
     owners = {s.strip() for s in os.environ.get("INBOX_OWNER_MATRIX_IDS", "").split(",") if s.strip()}
+    twofa_allow = {
+        s.strip().lower()
+        for s in os.environ.get("INBOX_2FA_SENDER_ALLOWLIST", "").split(",")
+        if s.strip()
+    }
 
     return Config(
         config_dir=config_dir,
@@ -84,6 +99,8 @@ def get_config() -> Config:
         hermes_api_url=_env("HERMES_API_URL"),
         api_server_key=_env("API_SERVER_KEY"),
         notify_target=_env("INBOX_NOTIFY_TARGET"),
+        module_2fa_enabled=_env_bool("INBOX_2FA_ENABLED", True),
+        twofa_sender_allowlist=frozenset(twofa_allow),
     )
 
 

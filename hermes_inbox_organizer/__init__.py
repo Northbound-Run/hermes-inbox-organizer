@@ -36,6 +36,7 @@ from .inbox_tool import (
     LoggingDraftWriter,
     make_inbox_create_draft_handler,
 )
+from .notifier import DeliveryNotifier
 from .oauth import PendingStore, load_oauth_client
 from .onboarding_tools import make_disconnect_tool, make_onboarding_tools
 from .rollup import (
@@ -217,6 +218,18 @@ def register(ctx: Any) -> InboxDaemon:
     trigger = DraftTrigger(dispatcher)
     daemon = _build_daemon(ctx, trigger)
 
+    # 2a. Notifier: proactive direct push to the owner (2FA codes, shipping
+    # updates) via the SAME captured gateway, without a draft turn. Defaults to
+    # Hermes's own home channel (/sethome); INBOX_NOTIFY_TARGET is an optional
+    # override. Phase 0 de-risk of DeliveryRouter; modules consume this seam.
+    from .config import get_config
+
+    notifier = DeliveryNotifier(
+        get_gateway=lambda: capture.gateway,
+        get_source=lambda: capture.source,
+        target=get_config().notify_target,
+    )
+
     # 2b. Onboarding: owner-gated chat tools to connect/complete Gmail accounts.
     owners = _load_owners()
     if not owners:
@@ -294,12 +307,18 @@ def register(ctx: Any) -> InboxDaemon:
 
         ctx.register_hook("pre_tool_call", _on_pre_tool_call)
 
-    # 4. Diagnostic command: fire a synthetic-injection draft turn on demand.
+    # 4. Diagnostic commands: fire a synthetic-injection draft turn, and (Phase 0)
+    # push a test notification through DeliveryRouter to verify the Notifier path.
     if hasattr(ctx, "register_command"):
         ctx.register_command(
             "inboxprobe",
             _make_probe_command(trigger),
             "Diagnostic: fire a synthetic draft turn (check logs for the PROBE line)",
+        )
+        ctx.register_command(
+            "inboxnotifyprobe",
+            _make_notify_probe_command(notifier),
+            "Diagnostic: push a test message to the notify channel (home / INBOX_NOTIFY_TARGET)",
         )
 
     daemon.start()
@@ -369,7 +388,7 @@ def _make_probe_command(trigger: DraftTrigger):
     composed draft reveals whether the live transcript reached the agent.
     """
 
-    def _handler(**_kwargs: Any) -> str:
+    def _handler(raw_args: str = "", **_kwargs: Any) -> str:
         try:
             trigger.request_draft(
                 account_id="probe",
@@ -383,6 +402,55 @@ def _make_probe_command(trigger: DraftTrigger):
             )
         except Exception as exc:  # never raise out of a command handler
             return f"inbox probe: dispatch failed: {exc}"
+
+    return _handler
+
+
+def _make_notify_probe_command(notifier: DeliveryNotifier):
+    """Build the /inboxnotifyprobe handler — push a test message and report inline.
+
+    The handler is ASYNC on purpose. Hermes dispatches plugin slash commands ON
+    the gateway event loop (``gateway/run.py`` awaits the handler). The Notifier
+    runs ``deliver()`` on that same loop via ``run_coroutine_threadsafe``, so a
+    SYNC handler that blocked waiting for the result would DEADLOCK the loop — the
+    delivery coroutine can't run until the handler returns, and the handler won't
+    return until the delivery completes (this is exactly the TimeoutError the
+    first cut hit: the push landed only *after* the 20s timeout).
+
+    So we offload ``notifier.send_with_detail`` to a thread via
+    ``run_in_executor`` and ``await`` it: the loop stays free to process the
+    delivery coroutine, we still report the outcome inline, and the probe runs
+    the SAME off-loop path the real module callers (worker threads / the Pub/Sub
+    daemon) use — so it's a faithful end-to-end check.
+    """
+
+    async def _handler(raw_args: str = "", **_kwargs: Any) -> str:
+        import asyncio
+
+        text = (
+            "\U0001f514 inbox notify probe — if you can read this, the "
+            "DeliveryRouter push path works from the daemon."
+        )
+        try:
+            loop = asyncio.get_running_loop()
+            ok, det = await loop.run_in_executor(
+                None, lambda: notifier.send_with_detail(text)
+            )
+        except Exception as exc:  # never raise out of a command handler
+            return f"inbox notify probe: FAILED ❌ (probe error: {exc})"
+        if ok:
+            return "inbox notify probe: delivered ✅ — check the home channel for the push."
+        d = det or {}
+        return (
+            "inbox notify probe: FAILED ❌ — diagnostics:\n"
+            f"- gateway_captured: {d.get('gateway_captured')}\n"
+            f"- loop: {d.get('loop')}\n"
+            f"- target: {d.get('target')} (via {d.get('target_source')})\n"
+            f"- error: {d.get('error')}\n"
+            f"- result: {str(d.get('result'))[:400]}\n"
+            f"- tb: {str(d.get('traceback'))[:400]}\n"
+            "(If 'no destination', run /sethome here or set INBOX_NOTIFY_TARGET.)"
+        )
 
     return _handler
 

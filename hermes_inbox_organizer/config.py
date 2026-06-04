@@ -44,6 +44,9 @@ class Config:
     wake_model: Optional[str]
     hermes_api_url: Optional[str]
     api_server_key: Optional[str]
+    # Notifications (proactive push to the owner — see notifier.py).
+    # OPTIONAL override; default destination is Hermes's /sethome home channel.
+    notify_target: Optional[str]  # INBOX_NOTIFY_TARGET: a room/chat id, e.g. "!room:server"
 
     def token_path(self, safe_email: str) -> str:
         """Path to an account's encrypted token file (``accounts/<email>.json``)."""
@@ -80,6 +83,7 @@ def get_config() -> Config:
         wake_model=_env("INBOX_WAKE_MODEL"),
         hermes_api_url=_env("HERMES_API_URL"),
         api_server_key=_env("API_SERVER_KEY"),
+        notify_target=_env("INBOX_NOTIFY_TARGET"),
     )
 
 

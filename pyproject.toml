@@ -31,8 +31,11 @@ testpaths = ["tests"]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-packages = ["hermes_inbox_organizer"]
+# Auto-discover the package + all its subpackages (e.g. hermes_inbox_organizer.modules)
+# so a non-editable `pip install` (the deployed image) ships them — an explicit
+# packages=[...] list silently drops new subpackages.
+[tool.setuptools.packages.find]
+include = ["hermes_inbox_organizer*"]
 
 [tool.setuptools.package-data]
 hermes_inbox_organizer = ["plugin.yaml"]

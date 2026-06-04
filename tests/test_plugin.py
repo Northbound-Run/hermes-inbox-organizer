@@ -94,3 +94,18 @@ def test_end_to_end_fyi_is_silent() -> None:
     )
     assert category == "2: FYI"
     assert daemon.pending() == []
+
+
+def test_register_wires_rollup_tool_via_registry() -> None:
+    # Phase 2: the rollup tool is now contributed by RollupModule through the
+    # registry, but the registered tool must be byte-identical to before.
+    from hermes_inbox_organizer.modules.rollup import _DESCRIPTION
+    from hermes_inbox_organizer.rollup import INBOX_UNREAD_ROLLUP_SCHEMA
+
+    ctx = FakeCtx()
+    register(ctx)
+    tool = next(t for t in ctx.tools if t["name"] == "inbox_unread_rollup")
+    assert tool["toolset"] == "inbox"
+    assert tool["schema"] is INBOX_UNREAD_ROLLUP_SCHEMA  # same schema object
+    assert tool["description"] == _DESCRIPTION  # description unchanged
+    assert callable(tool["handler"])

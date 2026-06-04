@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from hermes_inbox_organizer.labels import CATEGORIES, label_name
 from hermes_inbox_organizer.labels_apply import apply_category, ensure_labels
+from hermes_inbox_organizer.modules import InlineExecutor, Module, ModuleRegistry
 from hermes_inbox_organizer.triage import process_message
 
 LABEL_IDS = {label_name(c): f"L{c.sort_order}" for c in CATEGORIES}
@@ -196,3 +197,64 @@ def test_process_message_without_conn_skips_db(tmp_path) -> None:
         classify_fn=lambda parsed: "FYI",
     )
     assert cat == "FYI"  # returns normally, nothing recorded
+
+
+class _Rec(Module):
+    name = "rec"
+
+    def __init__(self) -> None:
+        self.inbound: list = []
+
+    def on_inbound(self, event) -> None:
+        self.inbound.append(event)
+
+
+def test_process_message_with_registry_classifies_and_dispatches() -> None:
+    svc = FakeService(msg=_msg())
+    rec = _Rec()
+    reg = ModuleRegistry([rec], classify_fn=lambda parsed: "FYI", executor=InlineExecutor())
+    cat = process_message(
+        message_id="m1", account_id="acct@x.com", service=svc, label_ids=LABEL_IDS, registry=reg,
+    )
+    assert cat == "FYI"  # registry.classify fell back to the default classify_fn
+    assert len(rec.inbound) == 1
+    ev = rec.inbound[0]
+    assert (ev.category, ev.message_id, ev.thread_id) == ("FYI", "m1", "t1")
+    assert ev.parsed["from"] == "a@x.com"  # event carries the parsed message (no service/conn)
+
+
+def test_registry_override_changes_category_and_wakes() -> None:
+    class _Force(Module):
+        name = "force"
+
+        def classify_override(self, parsed):
+            return "To Respond"
+
+    svc = FakeService(msg=_msg())
+    woke: list[dict] = []
+    reg = ModuleRegistry([_Force()], classify_fn=lambda parsed: "FYI", executor=InlineExecutor())
+    cat = process_message(
+        message_id="m1", account_id="acct@x.com", service=svc, label_ids=LABEL_IDS,
+        registry=reg, wake_fn=lambda **kw: woke.append(kw),
+    )
+    assert cat == "To Respond"  # override beat the FYI default
+    assert len(woke) == 1  # and the To Respond wake fired
+
+
+def test_no_dispatch_when_apply_raises(monkeypatch) -> None:
+    import pytest
+
+    from hermes_inbox_organizer import triage as triage_mod
+
+    def _boom(*a, **k):
+        raise RuntimeError("apply failed")
+
+    svc = FakeService(msg=_msg())
+    rec = _Rec()
+    reg = ModuleRegistry([rec], classify_fn=lambda parsed: "FYI", executor=InlineExecutor())
+    monkeypatch.setattr(triage_mod, "apply_category", _boom)
+    with pytest.raises(RuntimeError):
+        process_message(
+            message_id="m1", account_id="acct@x.com", service=svc, label_ids=LABEL_IDS, registry=reg,
+        )
+    assert rec.inbound == []  # failed apply -> observers NOT notified

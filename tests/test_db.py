@@ -120,3 +120,16 @@ def test_config_owner_ids_parsed(monkeypatch) -> None:
     config.reset_config()
     assert config.get_config().owner_matrix_ids == frozenset({"@a:x", "@b:y"})
     config.reset_config()
+
+
+def test_note_once_dedup_and_scoping(tmp_path) -> None:
+    conn = _db(tmp_path)
+    # First call records + returns True; repeats return False (deduped exactly once).
+    assert db.note_once(conn, "twofa", "a@x.com", "msg-1") is True
+    assert db.note_once(conn, "twofa", "a@x.com", "msg-1") is False
+    assert db.was_notified(conn, "twofa", "a@x.com", "msg-1") is True
+    # Scoped by (module, account, key): a different key/account/module is independent.
+    assert db.note_once(conn, "twofa", "a@x.com", "msg-2") is True
+    assert db.note_once(conn, "twofa", "b@x.com", "msg-1") is True
+    assert db.note_once(conn, "shipping", "a@x.com", "msg-1") is True
+    assert db.was_notified(conn, "twofa", "a@x.com", "never-seen") is False

@@ -36,6 +36,7 @@ from .inbox_tool import (
     LoggingDraftWriter,
     make_inbox_create_draft_handler,
 )
+from .modules import ModuleRegistry
 from .notifier import DeliveryNotifier
 from .oauth import PendingStore, load_oauth_client
 from .onboarding_tools import make_disconnect_tool, make_onboarding_tools
@@ -230,6 +231,20 @@ def register(ctx: Any) -> InboxDaemon:
         target=get_config().notify_target,
     )
 
+    # Module registry: feature modules (rollup, 2FA, shipping) hook into the
+    # triage flow through this. Empty in Phase 1 — the wiring is inert
+    # (registry.classify == the default classifier; dispatch is a no-op) until
+    # modules are added. Module-contributed agent tools are registered here.
+    registry = ModuleRegistry(_build_modules(notifier))
+    for spec in registry.tools():
+        ctx.register_tool(
+            name=spec.name,
+            toolset=spec.toolset,
+            schema=spec.schema,
+            handler=spec.handler,
+            description=spec.description,
+        )
+
     # 2b. Onboarding: owner-gated chat tools to connect/complete Gmail accounts.
     owners = _load_owners()
     if not owners:
@@ -323,14 +338,25 @@ def register(ctx: Any) -> InboxDaemon:
 
     daemon.start()
     try:
-        _maybe_start_runtime()
+        _maybe_start_runtime(registry)
     except Exception:
         logger.exception("inbox: autonomous runtime start failed (on-demand tools still work)")
     logger.info("hermes-inbox-organizer registered")
     return daemon
 
 
-def _maybe_start_runtime():
+def _build_modules(notifier: DeliveryNotifier) -> list:
+    """Construct the enabled feature modules (empty in Phase 1).
+
+    Later phases add the extracted rollup + the optional 2FA and shipping modules
+    here; each receives the shared ``notifier`` (and uses config/db for its own
+    state). Returning ``[]`` keeps the registry inert — behavior is identical to
+    the pre-module triage path.
+    """
+    return []
+
+
+def _maybe_start_runtime(registry: Any = None):
     """Start the autonomous Pub/Sub runtime if configured (SA key + config present).
 
     Reads `inbox-pubsub-sa.json` + `inbox-pubsub.json` from the config mount; if
@@ -366,6 +392,7 @@ def _maybe_start_runtime():
         db_path=get_config().db_path,
         wake_fn=wake_draft,
         on_auth_failure=_NEEDS_RECONNECT.add,
+        registry=registry,
     )
     global _RUNTIME
     _RUNTIME = runtime  # expose for hot-adding newly connected accounts

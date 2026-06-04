@@ -13,6 +13,7 @@ from . import db
 from .classifier import classify as _classify
 from .gmail import parse_message
 from .labels_apply import apply_category
+from .modules.base import InboundEvent
 
 ClassifyFn = Callable[[dict], str]
 # wake_fn(account_id, thread_id, subject, sender) -> induce an agent draft turn
@@ -28,11 +29,19 @@ def process_message(
     classify_fn: ClassifyFn = _classify,
     wake_fn: Optional[WakeFn] = None,
     conn: Optional[Any] = None,
+    registry: Optional[Any] = None,
 ) -> str:
     """Returns the bare category name applied to the message.
 
     When ``conn`` (a DB connection) is given, the classification and the thread's
     latest state are persisted (``classified_messages`` / ``thread_state``).
+
+    When a module ``registry`` is given, it drives the DECISION phase
+    (``registry.classify`` — module overrides, else the default classifier) and,
+    AFTER the label is applied + persisted, the NOTIFICATION phase
+    (``registry.dispatch_inbound`` — observers, offloaded). With ``registry=None``
+    the behavior is exactly the legacy path (``classify_fn``, no dispatch), so
+    the routing is unit-tested without any modules.
     """
     msg = (
         service.users()
@@ -41,7 +50,7 @@ def process_message(
         .execute()
     )
     parsed = parse_message(msg)
-    category = classify_fn(parsed)
+    category = registry.classify(parsed) if registry is not None else classify_fn(parsed)
     thread_id = parsed.get("thread_id", "")
     apply_category(service, message_id, category, label_ids, thread_id=thread_id)
     if conn is not None:
@@ -60,6 +69,18 @@ def process_message(
             thread_id=thread_id,
             last_message_id=message_id,
             last_category=category,
+        )
+    # Notification phase — only after a successful apply + persist, so a failed
+    # mutation never fires observers (e.g. a 2FA push) for mail that wasn't labelled.
+    if registry is not None:
+        registry.dispatch_inbound(
+            InboundEvent(
+                account_id=account_id,
+                message_id=message_id,
+                thread_id=thread_id,
+                parsed=parsed,
+                category=category,
+            )
         )
     if category == "To Respond" and wake_fn is not None:
         wake_fn(

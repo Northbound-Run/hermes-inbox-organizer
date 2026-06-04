@@ -145,6 +145,42 @@ def test_handle_notification_drains_triages_and_advances_cursor(tmp_path) -> Non
         assert db.get_thread_state(conn, "a@gmail.com", "t1")["last_category"] == "To Respond"
 
 
+def test_runtime_threads_registry_into_drain(tmp_path) -> None:
+    # A registry passed to the runtime must reach process_message in the real
+    # drain path: classify via the registry + dispatch on_inbound with the event.
+    from hermes_inbox_organizer.modules import InlineExecutor, Module, ModuleRegistry
+
+    class _Rec(Module):
+        name = "rec"
+
+        def __init__(self) -> None:
+            self.inbound: list = []
+
+        def on_inbound(self, event) -> None:
+            self.inbound.append(event)
+
+    pages, msg = _msg_pages()
+    dbp = _dbp(tmp_path)
+    _seed_cursor(dbp, "a@gmail.com", "150")
+    account = Account(email="a@gmail.com", build_service=lambda: FakeService(pages, msg, []))
+    account.label_ids = LABEL_IDS
+
+    rec = _Rec()
+    reg = ModuleRegistry([rec], classify_fn=lambda parsed: "FYI", executor=InlineExecutor())
+    rt = InboxRuntime(
+        accounts=[account], project="p", topic="t", subscription="s", sa_key_path="unused",
+        db_path=dbp, registry=reg,
+    )
+
+    rt.handle_notification(GmailNotification(email_address="a@gmail.com", history_id=200))
+
+    assert len(rec.inbound) == 1
+    ev = rec.inbound[0]
+    assert (ev.account_id, ev.message_id, ev.thread_id, ev.category) == (
+        "a@gmail.com", "m1", "t1", "FYI",
+    )
+
+
 def test_handle_notification_routes_to_the_notified_account(tmp_path) -> None:
     pages, msg = _msg_pages()
     a_modify: list[dict] = []

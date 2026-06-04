@@ -76,6 +76,19 @@ CREATE TABLE IF NOT EXISTS thread_state (
     last_processed_at_ms  INTEGER NOT NULL,
     PRIMARY KEY (account, thread_id)
 );
+
+-- Generic once-only dedup for notifying modules (e.g. the 2FA module keys on
+-- message_id so a Pub/Sub redelivery or the poll reconciler re-draining the
+-- same message notifies exactly once). dedup_key MUST NOT contain a secret or
+-- PII (never the 2FA code itself) — key on message_id. Mirrors the
+-- draft_requests check-then-insert dedup pattern.
+CREATE TABLE IF NOT EXISTS module_notified (
+    module          TEXT NOT NULL,
+    account         TEXT NOT NULL,
+    dedup_key       TEXT NOT NULL,
+    notified_at_ms  INTEGER NOT NULL,
+    PRIMARY KEY (module, account, dedup_key)
+);
 """
 
 _INITIALIZED_PATHS: set[str] = set()
@@ -243,3 +256,30 @@ def get_thread_state(conn: sqlite3.Connection, account: str, thread_id: str) -> 
         "SELECT * FROM thread_state WHERE account = ? AND thread_id = ?",
         (account, thread_id),
     ).fetchone()
+
+
+# ── Module dedup (generic once-only marker) ──────────────────────────────────────
+
+def note_once(conn: sqlite3.Connection, module: str, account: str, dedup_key: str) -> bool:
+    """Record ``(module, account, dedup_key)`` the first time only; True iff new.
+
+    Atomic check-then-insert (``INSERT OR IGNORE`` → rowcount): returns True on
+    the first call for a key and False on every later call, so a notifying module
+    fires exactly once even when the same message is re-drained (Pub/Sub
+    redelivery, poll reconciler, StaleCursor reset). ``dedup_key`` must not carry
+    a secret/PII — key on ``message_id`` (or carrier+tracking+stage), never a code.
+    """
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO module_notified (module, account, dedup_key, notified_at_ms) "
+        "VALUES (?, ?, ?, ?)",
+        (module, account, dedup_key, now_ms()),
+    )
+    return cur.rowcount == 1
+
+
+def was_notified(conn: sqlite3.Connection, module: str, account: str, dedup_key: str) -> bool:
+    """True if ``note_once`` has already recorded this key (read-only check)."""
+    return conn.execute(
+        "SELECT 1 FROM module_notified WHERE module = ? AND account = ? AND dedup_key = ?",
+        (module, account, dedup_key),
+    ).fetchone() is not None

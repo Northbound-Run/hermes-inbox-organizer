@@ -5,9 +5,20 @@ from __future__ import annotations
 import base64
 
 from hermes_inbox_organizer.labels import CATEGORIES, label_name
+from hermes_inbox_organizer.modules import InlineExecutor, Module, ModuleRegistry
 from hermes_inbox_organizer.sent_handler import handle_sent, sent_awaits_reply
 
 LABEL_IDS = {label_name(c): f"L{c.sort_order}" for c in CATEGORIES}  # L1..L8
+
+
+class _SentRec(Module):
+    name = "rec"
+
+    def __init__(self) -> None:
+        self.sent: list = []
+
+    def on_sent(self, event) -> None:
+        self.sent.append(event)
 
 
 def _b64(s: str) -> str:
@@ -128,6 +139,34 @@ def test_no_thread_id_is_noop() -> None:
     svc = FakeService(thread_id="")
     assert handle_sent(message_id="s1", account_id="a", service=svc, label_ids=LABEL_IDS) == ""
     assert svc.modify == []
+
+
+def test_handle_sent_dispatches_sent_event() -> None:
+    rec = _SentRec()
+    reg = ModuleRegistry([rec], executor=InlineExecutor())
+    svc = FakeService(
+        thread={"messages": [{"labelIds": ["L1", "INBOX"]}]},
+        sent_body="Thanks, got it — all set.",
+    )
+    target = handle_sent(
+        message_id="s1", account_id="a@x.com", service=svc, label_ids=LABEL_IDS, registry=reg
+    )
+    assert target == "Actioned"
+    assert len(rec.sent) == 1
+    ev = rec.sent[0]
+    assert (ev.target_category, ev.message_id, ev.account_id) == ("Actioned", "s1", "a@x.com")
+    assert ev.thread_id == "t1"
+
+
+def test_handle_sent_no_dispatch_on_noop() -> None:
+    rec = _SentRec()
+    reg = ModuleRegistry([rec], executor=InlineExecutor())
+    svc = FakeService(thread_id="")  # no thread → no-op
+    assert (
+        handle_sent(message_id="s1", account_id="a", service=svc, label_ids=LABEL_IDS, registry=reg)
+        == ""
+    )
+    assert rec.sent == []  # no move happened → no SentEvent
 
 
 def test_sent_awaits_reply_heuristic() -> None:

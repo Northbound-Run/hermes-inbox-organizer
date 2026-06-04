@@ -103,6 +103,7 @@ class InboxRuntime:
         wake_fn: Optional[Callable[..., Any]] = None,
         db_path: Optional[str] = None,
         on_auth_failure: Optional[Callable[[str], None]] = None,
+        registry: Optional[Any] = None,
     ) -> None:
         self._accounts = list(accounts)
         self._by_email = {a.email: a for a in self._accounts}
@@ -114,6 +115,7 @@ class InboxRuntime:
         self._wake_fn = wake_fn
         self._db_path = db_path or get_config().db_path
         self._on_auth_failure = on_auth_failure
+        self._registry = registry  # module registry; None => legacy single-classifier path
         self._auth_failed: set[str] = set()  # accounts already flagged for reconnect
         self._future = None
         # Reentrant: a drain under the lock can call remove_account (auth failure)
@@ -173,6 +175,7 @@ class InboxRuntime:
         self._future = sub.subscribe(sub_path, callback=self._on_message, flow_control=flow)
         threading.Thread(target=self._renewal_loop, name="inbox-watch-renewal", daemon=True).start()
         threading.Thread(target=self._poll_loop, name="inbox-poll-reconciler", daemon=True).start()
+        self._start_periodic_jobs()
         logger.info("inbox runtime: watching %d account(s), pulling %s", len(self._by_email), sub_path)
 
     def add_account(self, account: Account) -> bool:
@@ -269,6 +272,28 @@ class InboxRuntime:
                 except Exception:
                     logger.exception("inbox runtime: poll drain failed for %s", account.email)
 
+    def _start_periodic_jobs(self) -> None:
+        """Start each module-contributed timer job on its own daemon thread.
+
+        Empty until modules contribute ``periodic()`` jobs (e.g. the shipping
+        poller). A job's ``run_once`` is responsible for skipping accounts no
+        longer managed (the same pattern ``_poll_once`` uses)."""
+        if self._registry is None:
+            return
+        for job in self._registry.periodic():
+            threading.Thread(
+                target=self._run_periodic_job, args=(job,), name=f"inbox-job-{job.name}", daemon=True
+            ).start()
+            logger.info("inbox runtime: started periodic job %s (every %ss)", job.name, job.interval_s)
+
+    def _run_periodic_job(self, job) -> None:
+        while True:
+            time.sleep(job.interval_s)
+            try:
+                job.run_once()
+            except Exception:
+                logger.exception("inbox runtime: periodic job %s failed", job.name)
+
     def _on_message(self, message) -> None:
         try:
             data = message.data
@@ -317,6 +342,7 @@ class InboxRuntime:
                     label_ids=account.label_ids,
                     wake_fn=self._dedup_wake,
                     conn=conn,
+                    registry=self._registry,
                     **extra,
                 )
                 logger.info("inbox runtime: [%s] %s -> %s", account.email, message_id, category)
@@ -329,6 +355,7 @@ class InboxRuntime:
                     account_id=account.email,
                     service=service,
                     label_ids=account.label_ids,
+                    registry=self._registry,
                 )
                 logger.info("inbox runtime: [%s] SENT %s -> %s", account.email, message_id, target)
 

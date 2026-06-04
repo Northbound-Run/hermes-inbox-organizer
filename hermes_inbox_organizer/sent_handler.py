@@ -11,11 +11,11 @@ thread-level.
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from .gmail import parse_message
 from .labels import category_by_name, label_name
+from .modules.base import SentEvent
 
 # Phrases that signal the sender expects a response even without a "?".
 _REPLY_CUES = (
@@ -72,15 +72,26 @@ def sent_awaits_reply(body: str) -> bool:
 
 
 def handle_sent(
-    *, message_id: str, account_id: str, service: Any, label_ids: dict[str, str]
+    *,
+    message_id: str,
+    account_id: str,
+    service: Any,
+    label_ids: dict[str, str],
+    registry: Any = None,
 ) -> str:
-    """Returns the bare category applied to the thread ("Actioned"/"Awaiting Reply")."""
+    """Returns the bare category applied to the thread ("Actioned"/"Awaiting Reply").
+
+    When a module ``registry`` is given, fires ``registry.dispatch_sent`` (offloaded
+    observers) after the thread is moved. ``registry=None`` preserves the legacy
+    behavior so the routing is unit-tested without modules.
+    """
     msg = (
         service.users().messages().get(userId="me", id=message_id, format="full").execute()
     )
     thread_id = msg.get("threadId")
     if not thread_id:
         return ""
+    parsed = parse_message(msg)
 
     thread = (
         service.users().threads().get(userId="me", id=thread_id, format="minimal").execute()
@@ -91,7 +102,7 @@ def handle_sent(
 
     to_respond = _label_id(label_ids, "To Respond")
     to_respond_present = bool(to_respond and to_respond in present)
-    awaits = sent_awaits_reply(parse_message(msg).get("body", ""))
+    awaits = sent_awaits_reply(parsed.get("body", ""))
 
     # Actioned only when you closed a flagged thread with no open ask of your own;
     # if your reply asks something (or it's a fresh outbound) you're Awaiting Reply.
@@ -110,4 +121,14 @@ def handle_sent(
         id=thread_id,
         body={"addLabelIds": [target_id], "removeLabelIds": remove},
     ).execute()
+    if registry is not None:
+        registry.dispatch_sent(
+            SentEvent(
+                account_id=account_id,
+                message_id=message_id,
+                thread_id=thread_id,
+                parsed=parsed,
+                target_category=target_name,
+            )
+        )
     return target_name

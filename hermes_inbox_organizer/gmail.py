@@ -162,8 +162,10 @@ class GoogleGmailReader:
     def get_message(self, message_id: str, format: str = "full") -> dict:
         kwargs: dict[str, Any] = {"userId": "me", "id": message_id, "format": format}
         if format == "metadata":
-            # Headers we actually use; trims the payload (no body) for the rollup.
-            kwargs["metadataHeaders"] = ["From", "Subject", "Date"]
+            # Headers we actually use; trims the payload (no body). "To" is needed by
+            # the sent-mail backfill to rank recipients (Gmail omits unlisted headers);
+            # the rollup/list paths simply ignore it.
+            kwargs["metadataHeaders"] = ["From", "To", "Subject", "Date"]
         return self._svc.users().messages().get(**kwargs).execute()
 
     def list_labels(self) -> list[dict]:

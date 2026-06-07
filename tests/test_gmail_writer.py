@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 
-from hermes_inbox_organizer.gmail import GmailDraftWriter, build_reply_headers
+from hermes_inbox_organizer.gmail import GmailDraftWriter, GoogleGmailReader, build_reply_headers
 
 
 def _thread(messages: list[dict]) -> dict:
@@ -87,6 +87,28 @@ class _Service:
 
     def users(self):
         return _Users(self._thread, self._rec)
+
+
+def test_reader_metadata_fetch_includes_to_header() -> None:
+    # Regression (Phase 4 live finding): the sent-mail backfill ranks recipients by the
+    # To header, so metadata fetches MUST request it — Gmail omits unlisted headers.
+    captured: dict = {}
+
+    class _Msgs:
+        def get(self, **kw):
+            captured.update(kw)
+            return _Exec({"id": kw.get("id")})
+
+    class _U:
+        def messages(self):
+            return _Msgs()
+
+    class _Svc:
+        def users(self):
+            return _U()
+
+    GoogleGmailReader(_Svc()).get_message("m1", format="metadata")
+    assert "To" in captured["metadataHeaders"] and "From" in captured["metadataHeaders"]
 
 
 def test_create_draft_builds_mime_and_posts_to_thread() -> None:

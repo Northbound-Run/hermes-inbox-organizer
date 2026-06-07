@@ -64,12 +64,16 @@ _RUNTIME: Any = None
 # Accounts whose credentials died (revoked/expired) — surfaced to the owner as a
 # reconnect nudge in pre_llm_call; cleared when the account is (re)connected.
 _NEEDS_RECONNECT: set[str] = set()
-# Owner-gated tools (connecting/disconnecting mailboxes).
+# Owner-gated tools (connecting/disconnecting mailboxes + reverting learned state).
 CONNECT_TOOLS = {
     "inbox_connect_account",
     "inbox_complete_connection",
     "inbox_disconnect_account",
     "inbox_backfill_profiles",  # owner-only: expensive LLM backfill, never from a draft turn
+    # Draft-feedback revert affordances: mutate learned drafting state, so owner-only.
+    # (inbox_draft_feedback_status stays UNGATED — read-only, the owner's own data.)
+    "inbox_forget_lesson",
+    "inbox_clear_learned_notes",
 }
 
 # Tools an autonomous draft (wake) turn may use — DEFAULT-DENY everything else
@@ -210,6 +214,7 @@ def register(ctx: Any) -> InboxDaemon:
             _resolve_writer(ctx),
             record_draft=_record_draft_id,
             lookup_draft=_lookup_draft_id,
+            record_outcome=_record_draft_outcome,
         ),
         description="Create a Gmail draft reply (never sends).",
         emoji="\U0001f4dd",
@@ -437,6 +442,7 @@ def _build_modules(notifier: DeliveryNotifier) -> list:
     """
     from . import rollup as _rollup
     from .config import get_config
+    from .modules.draft_feedback import DraftFeedbackModule
     from .modules.rollup import RollupModule
     from .modules.shipping import ShippingModule
     from .modules.track17 import HttpTrack17Client
@@ -463,6 +469,16 @@ def _build_modules(notifier: DeliveryNotifier) -> list:
             enabled=cfg.module_shipping_enabled,
             max_active=cfg.shipping_max_active,
             poll_interval_s=cfg.shipping_poll_interval_s,
+        ),
+        # Draft reinforcement loop: pairs draft→sent, distils corrections into a
+        # learned layer, sweeps no-replies. The M1 liveness seams are injected here
+        # (managed-account resolver + the shared _NEEDS_RECONNECT set) exactly as
+        # RollupModule receives its resolver. Its tools() auto-register via the
+        # registry loop and its periodic() sweep auto-starts.
+        DraftFeedbackModule(
+            resolve_accounts=_managed_accounts,
+            needs_reconnect=lambda: _NEEDS_RECONNECT,
+            config=cfg,
         ),
     ]
 
@@ -812,6 +828,49 @@ def _record_draft_id(account_id: str, thread_id: str, draft_id: str) -> None:
 
     with contextlib.closing(db.connect(get_config().db_path)) as conn:
         db.set_draft_id(conn, account_id, thread_id, draft_id)
+
+
+def _record_draft_outcome(account_id: str, thread_id: str, body: str, draft_id: str) -> None:
+    """Capture the draft *body* for the reinforcement loop (draft-feedback capture point).
+
+    Mirrors :func:`_record_draft_id` (own short-lived ``db.connect`` inside the Hermes
+    api_server turn). Resolves the inbound correspondent from
+    ``draft_requests.from_addr`` — the value ``claim_draft`` stored on the To-Respond
+    dispatch (``set_draft_id`` does NOT set it) — via :func:`gmail.parse_addr`. G3: if
+    that resolves empty (probe/manual paths), still record the row so the body is
+    captured; the empty ``sender_email`` makes the distiller + example/learned-notes
+    writes (all sender-keyed) skip it downstream rather than write a NULL-keyed row.
+    The body is truncated to ``draft_learn.BODY_CAP`` so capture + later scoring use the
+    SAME cap (G4). A failure is swallowed by ``inbox_create_draft``'s try/except — this
+    must never break drafting.
+    """
+    from . import db, draft_learn
+    from .config import get_config
+    from .gmail import parse_addr
+
+    with contextlib.closing(db.connect(get_config().db_path)) as conn:
+        req = db.get_draft_request(conn, account_id, thread_id)
+        sender_email = parse_addr(req["from_addr"]) if req and req["from_addr"] else ""
+        db.upsert_draft_outcome_draft(
+            conn,
+            account=account_id,
+            thread_id=thread_id,
+            sender_email=sender_email,
+            gmail_draft_id=draft_id,
+            draft_body=(body or "")[: draft_learn.BODY_CAP],
+        )
+
+
+def _managed_accounts() -> set[str]:
+    """Currently-managed mailbox emails — the ``resolve_accounts`` seam for the
+    draft-feedback module's M1 liveness gate (the same token source the runtime
+    builds accounts from). Returns an empty set on any failure (never raises into
+    the sweep), so a transient token-read error just defers no_reply marking."""
+    try:
+        return set(_load_all_tokens().keys())
+    except Exception:
+        logger.exception("inbox: failed to resolve managed accounts for draft-feedback")
+        return set()
 
 
 def _lookup_draft_id(account_id: str, thread_id: str) -> Optional[str]:

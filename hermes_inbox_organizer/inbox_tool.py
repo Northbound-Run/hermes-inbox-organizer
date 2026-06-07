@@ -89,6 +89,8 @@ ResolveWriter = Callable[[str], Optional[GmailDraftWriter]]
 # call sites are unaffected and tests inject fakes).
 RecordDraft = Callable[[str, str, str], Any]       # (account_id, thread_id, draft_id) -> persist
 LookupDraft = Callable[[str, str], Optional[str]]  # (account_id, thread_id) -> existing draft id | None
+# (account_id, thread_id, body, draft_id) -> persist the draft body for the feedback loop
+RecordOutcome = Callable[[str, str, str, str], Any]
 
 
 def make_inbox_create_draft_handler(
@@ -96,6 +98,7 @@ def make_inbox_create_draft_handler(
     *,
     record_draft: Optional[RecordDraft] = None,
     lookup_draft: Optional[LookupDraft] = None,
+    record_outcome: Optional[RecordOutcome] = None,
 ):
     """Build the tool handler closure over an account->writer resolver.
 
@@ -103,7 +106,11 @@ def make_inbox_create_draft_handler(
     ledger is closed (``draft_requests.gmail_draft_id``); a recorder failure is
     logged, never raised (tool contract). ``lookup_draft`` returns an existing
     draft id for the thread so a re-draft UPDATES it rather than creating a
-    duplicate. Both default to None (no-op) — production wires them to the DB.
+    duplicate. ``record_outcome`` is the draft-feedback-loop capture point: called
+    with ``(account_id, thread_id, body, draft_id)`` right after ``record_draft``
+    so the draft body is persisted for later delta scoring; a failure is also
+    logged and never raised. All three default to None (no-op) — production wires
+    them to the DB; existing call sites and tests are unaffected.
     """
 
     def handler(args: dict, **_kwargs: Any) -> str:
@@ -137,6 +144,13 @@ def make_inbox_create_draft_handler(
             except Exception:  # recording must never break the tool
                 logger.exception(
                     "inbox_create_draft: failed to record draft id for thread %s", thread_id
+                )
+        if record_outcome is not None:
+            try:
+                record_outcome(account_id, thread_id, body, draft_id)
+            except Exception:  # recording must never break the tool
+                logger.exception(
+                    "inbox_create_draft: failed to record outcome for thread %s", thread_id
                 )
         return json.dumps({"ok": True, "draft_id": draft_id, "thread_id": thread_id})
 

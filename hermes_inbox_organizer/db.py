@@ -26,7 +26,7 @@ from typing import Optional
 
 from .config import get_config
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS accounts (
@@ -122,14 +122,66 @@ CREATE TABLE IF NOT EXISTS sender_profiles (
     sender_email        TEXT NOT NULL,            -- normalized: bare lowercased address
     display_name        TEXT,
     relationship        TEXT,
-    voice_notes         TEXT,                     -- how the owner writes to this person
+    voice_notes         TEXT,                     -- how the owner writes to this person (backfill/agent layer)
     tone_hints          TEXT,
+    learned_notes       TEXT,                     -- learned-from-edits layer (draft feedback); never overwrites voice_notes
+    learned_updated_ms  INTEGER,
     draft_count         INTEGER NOT NULL DEFAULT 0,
     last_drafted_at_ms  INTEGER,
     source              TEXT,                      -- 'backfill' | 'agent' | 'manual'
     updated_at_ms       INTEGER NOT NULL,
     PRIMARY KEY (account, sender_email)
 );
+
+-- Draft feedback loop: the draft<->sent pairing ledger + gold-example store. Kept
+-- separate from draft_requests so the hot claim/retry row is not widened with large
+-- bodies or a second lifecycle. Keyed (account, thread_id). A new table, so it is
+-- created via SCHEMA_SQL on the next connect even on an existing DB. ``draft_body``
+-- is what WE wrote (captured at inbox_create_draft); ``sent_body`` is what actually
+-- went out (owner prose, quotes stripped) = the gold example. ``outcome`` is the
+-- classification; ``learned`` flips to 1 once distilled/applied. ``sender_email`` is
+-- the normalized inbound correspondent we replied TO.
+CREATE TABLE IF NOT EXISTS draft_outcomes (
+    account           TEXT NOT NULL,
+    thread_id         TEXT NOT NULL,
+    sender_email      TEXT,                 -- normalized correspondent we replied TO
+    gmail_draft_id    TEXT,
+    draft_body        TEXT,                 -- what WE wrote (captured at inbox_create_draft); NULL for capture-all-sent rows
+    draft_created_ms  INTEGER,
+    sent_message_id   TEXT,                 -- the owner's SENT message on this thread, if any
+    sent_body         TEXT,                 -- what actually went out (owner prose, quotes stripped) = the gold example
+    sent_at_ms        INTEGER,
+    outcome           TEXT NOT NULL DEFAULT 'pending',
+                       -- 'pending'|'sent_verbatim'|'sent_edited'|'sent_ignored'|'no_reply'|'sent_no_draft'
+    similarity        INTEGER,              -- 0-100 draft<->sent (cheap local metric); NULL when no draft
+    learned           INTEGER NOT NULL DEFAULT 0,   -- 1 once distilled/applied
+    learned_at_ms     INTEGER,
+    updated_at_ms     INTEGER NOT NULL,
+    PRIMARY KEY (account, thread_id)
+);
+CREATE INDEX IF NOT EXISTS idx_do_learn_queue ON draft_outcomes (learned, outcome);
+CREATE INDEX IF NOT EXISTS idx_do_examples    ON draft_outcomes (account, sender_email, sent_at_ms);
+CREATE INDEX IF NOT EXISTS idx_do_pending     ON draft_outcomes (outcome, draft_created_ms);
+
+-- Draft feedback loop: global learned do/don't rules distilled from draft<->sent
+-- deltas. ``norm_rule`` (lowercased/trimmed) is the dedup key; a repeat rule bumps
+-- ``evidence_count`` + ``last_seen_ms`` instead of inserting. ``active=0`` is a
+-- soft-disable (revert affordance / prune). ``scope`` reserves room for
+-- category/sender lessons later; v1 ships 'global' only.
+CREATE TABLE IF NOT EXISTS draft_lessons (
+    lesson_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    account        TEXT NOT NULL,
+    scope          TEXT NOT NULL DEFAULT 'global',  -- room for 'category'/'sender' later
+    polarity       TEXT NOT NULL,                   -- 'do' | 'dont'
+    rule           TEXT NOT NULL,
+    norm_rule      TEXT NOT NULL,                   -- lowercased/trimmed for dedup
+    evidence_count INTEGER NOT NULL DEFAULT 1,
+    active         INTEGER NOT NULL DEFAULT 1,      -- soft-disable = revert
+    created_at_ms  INTEGER NOT NULL,
+    last_seen_ms   INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lesson_dedup ON draft_lessons (account, scope, polarity, norm_rule);
+CREATE INDEX IF NOT EXISTS idx_lesson_rank ON draft_lessons (account, active, evidence_count DESC, last_seen_ms DESC);
 """
 
 _INITIALIZED_PATHS: set[str] = set()
@@ -171,6 +223,17 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ):
             if col not in existing:
                 conn.execute(f"ALTER TABLE draft_requests ADD COLUMN {col} {decl}")
+    if version < 3:
+        # v3: the draft-feedback loop. ``draft_outcomes``/``draft_lessons`` are new
+        # tables (created by SCHEMA_SQL on this first touch, so no ALTER needed), but
+        # sender_profiles gains the learned-from-edits columns — additive ALTERs so an
+        # existing v2 state.db upgrades in place. The guard is REQUIRED: a fresh DB
+        # already has these from SCHEMA_SQL above, so an unguarded ALTER would hit
+        # "duplicate column" and crash the daemon on boot.
+        existing = {r[1] for r in conn.execute("PRAGMA table_info(sender_profiles)")}
+        for col, decl in (("learned_notes", "TEXT"), ("learned_updated_ms", "INTEGER")):
+            if col not in existing:
+                conn.execute(f"ALTER TABLE sender_profiles ADD COLUMN {col} {decl}")
     conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 
 
@@ -440,6 +503,271 @@ def bump_sender_draft_count(conn: sqlite3.Connection, account: str, sender_email
               SET draft_count = draft_count + 1, last_drafted_at_ms = ?, updated_at_ms = ?
             WHERE account = ? AND sender_email = ?""",
         (now_ms(), now_ms(), account, sender_email),
+    )
+
+
+def upsert_learned_notes(
+    conn: sqlite3.Connection, account: str, sender_email: str, learned_notes: str
+) -> None:
+    """Write the learned-from-edits voice note for a sender (the auditable learned layer).
+
+    Touches ``learned_notes`` + ``learned_updated_ms`` ONLY — never ``voice_notes``
+    (the backfill/agent layer), so distilled content stays in a separate, revertible
+    field. Creates the profile row if it doesn't exist yet so a sender we've never
+    backfilled can still accumulate learnings.
+    """
+    conn.execute(
+        """INSERT INTO sender_profiles
+               (account, sender_email, learned_notes, learned_updated_ms, draft_count, updated_at_ms)
+               VALUES (:acct, :addr, :ln, :now, 0, :now)
+           ON CONFLICT(account, sender_email) DO UPDATE SET
+               learned_notes      = :ln,
+               learned_updated_ms = :now,
+               updated_at_ms      = :now""",
+        {"acct": account, "addr": sender_email, "ln": learned_notes, "now": now_ms()},
+    )
+
+
+def clear_learned_notes(conn: sqlite3.Connection, account: str, sender_email: str) -> None:
+    """Revert affordance: drop the learned voice note (leaves ``voice_notes`` intact)."""
+    conn.execute(
+        """UPDATE sender_profiles
+              SET learned_notes = NULL, learned_updated_ms = ?, updated_at_ms = ?
+            WHERE account = ? AND sender_email = ?""",
+        (now_ms(), now_ms(), account, sender_email),
+    )
+
+
+# ── Draft feedback: outcome pairing ledger + gold examples ────────────────────────
+
+def upsert_draft_outcome_draft(
+    conn: sqlite3.Connection,
+    *,
+    account: str,
+    thread_id: str,
+    sender_email: str,
+    gmail_draft_id: str,
+    draft_body: str,
+) -> None:
+    """Write/refresh the draft side of an outcome row (captured at inbox_create_draft).
+
+    Conditional upsert (M3/G1): insert-if-absent always proceeds, but the ON CONFLICT
+    branch resets ``outcome='pending'`` and overwrites ``draft_body``/``gmail_draft_id``
+    ONLY ``WHERE draft_outcomes.outcome = 'pending'``. So a re-draft/retry write that
+    lands *after* ``on_sent`` already recorded a send cannot clobber the captured
+    ``sent_body``/outcome — the gold example survives.
+    """
+    conn.execute(
+        """INSERT INTO draft_outcomes
+               (account, thread_id, sender_email, gmail_draft_id, draft_body,
+                draft_created_ms, outcome, updated_at_ms)
+               VALUES (:acct, :tid, :addr, :did, :body, :now, 'pending', :now)
+           ON CONFLICT(account, thread_id) DO UPDATE SET
+               sender_email     = excluded.sender_email,
+               gmail_draft_id   = excluded.gmail_draft_id,
+               draft_body       = excluded.draft_body,
+               draft_created_ms = excluded.draft_created_ms,
+               outcome          = 'pending',
+               updated_at_ms    = excluded.updated_at_ms
+             WHERE draft_outcomes.outcome = 'pending'""",
+        {"acct": account, "tid": thread_id, "addr": sender_email, "did": gmail_draft_id,
+         "body": draft_body, "now": now_ms()},
+    )
+
+
+def record_draft_outcome_sent(
+    conn: sqlite3.Connection,
+    *,
+    account: str,
+    thread_id: str,
+    sender_email: str,
+    sent_message_id: str,
+    sent_body: str,
+    similarity: Optional[int],
+    outcome: str,
+) -> None:
+    """Write the sent side + outcome (upsert; supports ``draft_body IS NULL`` capture-all rows).
+
+    Used both for a drafted thread (the row already exists with a ``draft_body``) and
+    for a ``sent_no_draft`` capture-all row (inserted fresh, ``draft_body`` NULL). The
+    sent side is authoritative, so this overwrites unconditionally — it is only called
+    from the single-threaded ``on_sent`` path after pairing.
+    """
+    conn.execute(
+        """INSERT INTO draft_outcomes
+               (account, thread_id, sender_email, sent_message_id, sent_body,
+                sent_at_ms, outcome, similarity, updated_at_ms)
+               VALUES (:acct, :tid, :addr, :smid, :sbody, :now, :outcome, :sim, :now)
+           ON CONFLICT(account, thread_id) DO UPDATE SET
+               sender_email    = COALESCE(NULLIF(excluded.sender_email, ''), draft_outcomes.sender_email),
+               sent_message_id = excluded.sent_message_id,
+               sent_body       = excluded.sent_body,
+               sent_at_ms      = excluded.sent_at_ms,
+               outcome         = excluded.outcome,
+               similarity      = excluded.similarity,
+               updated_at_ms   = excluded.updated_at_ms""",
+        {"acct": account, "tid": thread_id, "addr": sender_email, "smid": sent_message_id,
+         "sbody": sent_body, "outcome": outcome, "sim": similarity, "now": now_ms()},
+    )
+
+
+def get_draft_outcome(
+    conn: sqlite3.Connection, account: str, thread_id: str
+) -> Optional[sqlite3.Row]:
+    """The draft_outcomes row for a thread, or None."""
+    return conn.execute(
+        "SELECT * FROM draft_outcomes WHERE account = ? AND thread_id = ?",
+        (account, thread_id),
+    ).fetchone()
+
+
+def unlearned_outcomes(conn: sqlite3.Connection, *, limit: int) -> list[sqlite3.Row]:
+    """Rows ready to distill: classified (not ``pending``) but not yet ``learned``.
+
+    The distill queue (and the sweep's belt-and-suspenders retry for an ``on_sent``
+    distill that failed). Oldest first so a backlog drains in order.
+    """
+    return conn.execute(
+        """SELECT * FROM draft_outcomes
+            WHERE learned = 0 AND outcome != 'pending'
+            ORDER BY updated_at_ms
+            LIMIT ?""",
+        (limit,),
+    ).fetchall()
+
+
+def pending_outcomes_older_than(
+    conn: sqlite3.Connection, *, before_ms: int
+) -> list[sqlite3.Row]:
+    """``pending`` drafted rows whose draft is older than ``before_ms`` (no-reply sweep)."""
+    return conn.execute(
+        """SELECT * FROM draft_outcomes
+            WHERE outcome = 'pending' AND draft_created_ms IS NOT NULL AND draft_created_ms <= ?
+            ORDER BY draft_created_ms""",
+        (before_ms,),
+    ).fetchall()
+
+
+def mark_outcome_learned(conn: sqlite3.Connection, account: str, thread_id: str) -> None:
+    """Flip ``learned=1`` + stamp ``learned_at_ms`` so the distill queue won't re-pick it."""
+    conn.execute(
+        """UPDATE draft_outcomes
+              SET learned = 1, learned_at_ms = ?, updated_at_ms = ?
+            WHERE account = ? AND thread_id = ?""",
+        (now_ms(), now_ms(), account, thread_id),
+    )
+
+
+def recent_sent_examples(
+    conn: sqlite3.Connection, account: str, sender_email: str, *, limit: int
+) -> list[sqlite3.Row]:
+    """Gold examples for a sender: rows with a non-empty ``sent_body``, newest first."""
+    return conn.execute(
+        """SELECT * FROM draft_outcomes
+            WHERE account = ? AND sender_email = ?
+              AND sent_body IS NOT NULL AND sent_body != ''
+            ORDER BY sent_at_ms DESC
+            LIMIT ?""",
+        (account, sender_email, limit),
+    ).fetchall()
+
+
+def count_outcomes_by_sender(
+    conn: sqlite3.Connection, account: str, sender_email: str
+) -> dict[str, int]:
+    """Outcome histogram for a sender (status tool + the no_reply threshold)."""
+    rows = conn.execute(
+        """SELECT outcome, count(*) AS n FROM draft_outcomes
+            WHERE account = ? AND sender_email = ?
+            GROUP BY outcome""",
+        (account, sender_email),
+    ).fetchall()
+    return {r["outcome"]: r["n"] for r in rows}
+
+
+def delete_learned_outcomes_older_than(
+    conn: sqlite3.Connection, *, before_ms: int
+) -> int:
+    """Retention prune: drop already-learned outcomes (incl. gold examples) past the
+    window to bound ``draft_outcomes`` growth. Returns the number deleted."""
+    cur = conn.execute(
+        "DELETE FROM draft_outcomes WHERE learned = 1 AND updated_at_ms <= ?",
+        (before_ms,),
+    )
+    return cur.rowcount
+
+
+# ── Draft feedback: global learned lessons ────────────────────────────────────────
+
+def upsert_lesson(
+    conn: sqlite3.Connection,
+    *,
+    account: str,
+    scope: str,
+    polarity: str,
+    rule: str,
+) -> None:
+    """Insert a do/don't lesson or, on a duplicate ``norm_rule``, bump its evidence.
+
+    Dedup key is ``(account, scope, polarity, norm_rule)`` where ``norm_rule`` is the
+    lowercased/trimmed ``rule``. A repeat of the same lesson increments
+    ``evidence_count`` + bumps ``last_seen_ms`` (so it ranks higher) rather than
+    inserting a near-duplicate. Local dedup — never trust the model to be unique.
+    """
+    norm = rule.strip().lower()
+    conn.execute(
+        """INSERT INTO draft_lessons
+               (account, scope, polarity, rule, norm_rule, evidence_count, active,
+                created_at_ms, last_seen_ms)
+               VALUES (:acct, :scope, :pol, :rule, :norm, 1, 1, :now, :now)
+           ON CONFLICT(account, scope, polarity, norm_rule) DO UPDATE SET
+               evidence_count = evidence_count + 1,
+               rule           = excluded.rule,
+               active         = 1,
+               last_seen_ms   = :now""",
+        {"acct": account, "scope": scope, "pol": polarity, "rule": rule, "norm": norm,
+         "now": now_ms()},
+    )
+
+
+def top_lessons(
+    conn: sqlite3.Connection, account: str, *, limit: int
+) -> list[sqlite3.Row]:
+    """Active lessons for an account, ranked by evidence then recency (brief + status)."""
+    return conn.execute(
+        """SELECT * FROM draft_lessons
+            WHERE account = ? AND active = 1
+            ORDER BY evidence_count DESC, last_seen_ms DESC
+            LIMIT ?""",
+        (account, limit),
+    ).fetchall()
+
+
+def prune_lessons(conn: sqlite3.Connection, account: str, *, keep: int) -> int:
+    """Soft-evict (``active=0``) the lowest-value active lessons beyond ``keep``.
+
+    Deterministic tiebreak ``ORDER BY evidence_count ASC, last_seen_ms ASC`` (stable
+    when many lessons share ``evidence_count=1``). Returns the number evicted. Soft so
+    a pruned lesson can be re-activated by ``upsert_lesson`` seeing it again.
+    """
+    cur = conn.execute(
+        """UPDATE draft_lessons SET active = 0
+            WHERE lesson_id IN (
+                SELECT lesson_id FROM draft_lessons
+                 WHERE account = ? AND active = 1
+                 ORDER BY evidence_count DESC, last_seen_ms DESC
+                 LIMIT -1 OFFSET ?
+            )""",
+        (account, keep),
+    )
+    return cur.rowcount
+
+
+def set_lesson_active(conn: sqlite3.Connection, lesson_id: int, active: int) -> None:
+    """Revert affordance: toggle a lesson's ``active`` flag (1=on, 0=soft-disabled)."""
+    conn.execute(
+        "UPDATE draft_lessons SET active = ? WHERE lesson_id = ?",
+        (1 if active else 0, lesson_id),
     )
 
 

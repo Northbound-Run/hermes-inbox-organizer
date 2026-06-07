@@ -40,6 +40,9 @@ env — see [setup.md](./setup.md).
 | `inbox_unread_rollup` | On-demand "what needs me?" digest across accounts (read-only) |
 | `inbox_create_draft` | Write a reply **draft** for a thread (never sends) — Hermes composes the body |
 | `inbox_connect_account` / `inbox_complete_connection` / `inbox_disconnect_account` | Owner-only account onboarding |
+| `inbox_draft_feedback_status` | Inspect what the reinforcement loop has learned (outcome histogram, lessons, learned-note senders) — read-only |
+| `inbox_forget_lesson` | Soft-disable a learned do/don't lesson by id — owner-gated |
+| `inbox_clear_learned_notes` | Clear a correspondent's learned voice note — owner-gated |
 
 The daemon also classifies + labels mail and triggers drafts autonomously — those
 aren't tools, they happen in the background.
@@ -63,3 +66,9 @@ threads coming up:
 Then ask the agent to run `inbox_list_accounts` to confirm the tools are live.
 (The runtime logs via Python `logging`, which isn't on docker stdout — confirm
 the daemon via those boot-hook thread lines, not by grepping for runtime logs.)
+
+## Further reading
+
+- [draft-reinforcement-loop.md](./draft-reinforcement-loop.md) — how the draft
+  feedback loop works, all `INBOX_DRAFT_FEEDBACK_*` knobs, and how to inspect
+  or revert the learned state

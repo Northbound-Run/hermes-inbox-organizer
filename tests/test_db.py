@@ -17,7 +17,7 @@ def test_connect_creates_schema_and_is_idempotent(tmp_path) -> None:
     conn = _db(tmp_path)
     names = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"accounts", "draft_requests", "classified_messages", "thread_state"} <= names
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
     assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     # Re-connecting the same path is a no-op that keeps the data intact.
     conn2 = db.connect(tmp_path / "state.db")
@@ -231,8 +231,9 @@ def test_draft_id_round_trips_across_threads(tmp_path) -> None:
         assert db.get_draft_request(conn, "a@x.com", "t1")["gmail_draft_id"] == "draft-9"
 
 
-def test_migration_v1_to_v2_adds_columns_preserving_data(tmp_path) -> None:
-    # AC7: an existing v1 state.db upgrades in place — new columns added, rows kept.
+def test_migration_v1_to_current_adds_columns_preserving_data(tmp_path) -> None:
+    # AC7: an existing v1 state.db upgrades in place to the CURRENT version — the v2
+    # draft_requests columns are added and v1 rows kept (the chained v2+v3 blocks run).
     dbp = tmp_path / "state.db"
     raw = sqlite3.connect(str(dbp))
     raw.executescript(
@@ -249,8 +250,8 @@ def test_migration_v1_to_v2_adds_columns_preserving_data(tmp_path) -> None:
     )
     raw.commit()
     raw.close()
-    with contextlib.closing(db.connect(dbp)) as conn:  # triggers the v1 -> v2 migration
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    with contextlib.closing(db.connect(dbp)) as conn:  # triggers the v1 -> v3 migration chain
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
         cols = {r[1] for r in conn.execute("PRAGMA table_info(draft_requests)")}
         assert {"from_addr", "subject", "attempts", "last_attempt_ms"} <= cols
         row = db.get_draft_request(conn, "a@x.com", "t1")
@@ -289,3 +290,317 @@ def test_sender_profile_upsert_get_and_bump(tmp_path) -> None:
     assert p["draft_count"] == 1 and p["last_drafted_at_ms"] is not None
     # per-account scoping
     assert db.get_sender_profile(conn, "b@x.com", "bob@y.com") is None
+
+
+# ── Schema v3: draft feedback loop ────────────────────────────────────────────────
+
+def test_v3_fresh_connect_creates_tables_columns_and_version(tmp_path) -> None:
+    # AC1 + AC15/G5: a brand-new path connect must NOT raise (SCHEMA_SQL creates
+    # sender_profiles WITH the new columns, then the guarded v3 ALTER skips them);
+    # the new tables/columns exist and user_version == 3.
+    conn = _db(tmp_path)
+    names = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"draft_outcomes", "draft_lessons"} <= names
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    sp_cols = {r[1] for r in conn.execute("PRAGMA table_info(sender_profiles)")}
+    assert {"learned_notes", "learned_updated_ms"} <= sp_cols
+    do_cols = {r[1] for r in conn.execute("PRAGMA table_info(draft_outcomes)")}
+    assert {"draft_body", "sent_body", "outcome", "similarity", "learned"} <= do_cols
+    # the v3 indexes are present
+    idx = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    assert {"idx_do_learn_queue", "idx_do_examples", "idx_do_pending",
+            "idx_lesson_dedup", "idx_lesson_rank"} <= idx
+
+
+def test_migration_v2_to_v3_adds_columns_preserving_data(tmp_path) -> None:
+    # AC2: an existing v2 state.db upgrades in place — sender_profiles gains the two
+    # learned columns, draft_outcomes/draft_lessons get created, rows are preserved.
+    dbp = tmp_path / "state.db"
+    raw = sqlite3.connect(str(dbp))
+    raw.executescript(
+        """
+        CREATE TABLE sender_profiles (
+            account TEXT NOT NULL, sender_email TEXT NOT NULL,
+            display_name TEXT, relationship TEXT, voice_notes TEXT, tone_hints TEXT,
+            draft_count INTEGER NOT NULL DEFAULT 0, last_drafted_at_ms INTEGER,
+            source TEXT, updated_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (account, sender_email)
+        );
+        INSERT INTO sender_profiles (account, sender_email, voice_notes, draft_count, updated_at_ms)
+             VALUES ('a@x.com', 'bob@y.com', 'warm, brief', 4, 123);
+        PRAGMA user_version = 2;
+        """
+    )
+    raw.commit()
+    raw.close()
+    with contextlib.closing(db.connect(dbp)) as conn:  # triggers the v2 -> v3 migration
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(sender_profiles)")}
+        assert {"learned_notes", "learned_updated_ms"} <= cols
+        names = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert {"draft_outcomes", "draft_lessons"} <= names
+        p = db.get_sender_profile(conn, "a@x.com", "bob@y.com")
+        assert p["voice_notes"] == "warm, brief"  # data preserved
+        assert p["draft_count"] == 4
+        assert p["learned_notes"] is None         # new column NULL-backfilled
+
+
+def test_v2_image_against_v3_db_noops(tmp_path) -> None:
+    # AC2 (rollback-safe): a v2 image (lower _SCHEMA_VERSION) seeing a v3 DB must
+    # return early from _migrate and leave user_version at 3.
+    conn = _db(tmp_path)  # fresh v3 DB
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    # simulate the older image's _migrate guard: version >= its target -> no-op
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert version >= 2  # the early-return condition for a v2 image
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+
+
+def test_upsert_draft_outcome_draft_and_get(tmp_path) -> None:
+    conn = _db(tmp_path)
+    assert db.get_draft_outcome(conn, "a@x.com", "t1") is None
+    db.upsert_draft_outcome_draft(
+        conn, account="a@x.com", thread_id="t1", sender_email="bob@y.com",
+        gmail_draft_id="d-1", draft_body="Hello Bob, here is the plan.",
+    )
+    row = db.get_draft_outcome(conn, "a@x.com", "t1")
+    assert row["draft_body"] == "Hello Bob, here is the plan."
+    assert row["gmail_draft_id"] == "d-1" and row["sender_email"] == "bob@y.com"
+    assert row["outcome"] == "pending" and row["learned"] == 0
+    assert row["draft_created_ms"] is not None
+    # a re-draft while still pending refreshes the body + draft id
+    db.upsert_draft_outcome_draft(
+        conn, account="a@x.com", thread_id="t1", sender_email="bob@y.com",
+        gmail_draft_id="d-2", draft_body="Hello Bob, revised plan.",
+    )
+    row = db.get_draft_outcome(conn, "a@x.com", "t1")
+    assert row["draft_body"] == "Hello Bob, revised plan." and row["gmail_draft_id"] == "d-2"
+
+
+def test_upsert_draft_outcome_draft_does_not_clobber_recorded_send(tmp_path) -> None:
+    # AC16/M3/G1: once a send is recorded (outcome != 'pending'), a late re-draft
+    # upsert must NOT overwrite draft_body/outcome — the conditional WHERE holds.
+    conn = _db(tmp_path)
+    db.upsert_draft_outcome_draft(
+        conn, account="a@x.com", thread_id="t1", sender_email="bob@y.com",
+        gmail_draft_id="d-1", draft_body="original draft",
+    )
+    db.record_draft_outcome_sent(
+        conn, account="a@x.com", thread_id="t1", sender_email="bob@y.com",
+        sent_message_id="m-9", sent_body="what I actually sent", similarity=42,
+        outcome="sent_edited",
+    )
+    # a retry re-draft lands AFTER the send was recorded
+    db.upsert_draft_outcome_draft(
+        conn, account="a@x.com", thread_id="t1", sender_email="bob@y.com",
+        gmail_draft_id="d-2", draft_body="LATE re-draft that must not win",
+    )
+    row = db.get_draft_outcome(conn, "a@x.com", "t1")
+    assert row["outcome"] == "sent_edited"             # survived
+    assert row["sent_body"] == "what I actually sent"  # survived
+    assert row["draft_body"] == "original draft"       # NOT clobbered
+    assert row["similarity"] == 42
+
+
+def test_record_draft_outcome_sent_inserts_capture_all_row(tmp_path) -> None:
+    # AC5 shape: a sent_no_draft capture-all row inserts fresh with draft_body NULL.
+    conn = _db(tmp_path)
+    db.record_draft_outcome_sent(
+        conn, account="a@x.com", thread_id="t5", sender_email="carol@z.com",
+        sent_message_id="m-5", sent_body="thanks, will do", similarity=None,
+        outcome="sent_no_draft",
+    )
+    row = db.get_draft_outcome(conn, "a@x.com", "t5")
+    assert row["draft_body"] is None and row["sent_body"] == "thanks, will do"
+    assert row["outcome"] == "sent_no_draft" and row["similarity"] is None
+
+
+def test_unlearned_outcomes_and_mark_learned(tmp_path) -> None:
+    conn = _db(tmp_path)
+    # pending rows are excluded; classified-but-unlearned are returned oldest first
+    db.upsert_draft_outcome_draft(
+        conn, account="a", thread_id="t-pending", sender_email="s", gmail_draft_id="d",
+        draft_body="b",
+    )
+    db.record_draft_outcome_sent(
+        conn, account="a", thread_id="t-edit", sender_email="s", sent_message_id="m1",
+        sent_body="x", similarity=50, outcome="sent_edited",
+    )
+    db.record_draft_outcome_sent(
+        conn, account="a", thread_id="t-ignore", sender_email="s", sent_message_id="m2",
+        sent_body="y", similarity=10, outcome="sent_ignored",
+    )
+    queue = db.unlearned_outcomes(conn, limit=10)
+    tids = {r["thread_id"] for r in queue}
+    assert tids == {"t-edit", "t-ignore"}  # pending excluded
+    db.mark_outcome_learned(conn, "a", "t-edit")
+    queue = db.unlearned_outcomes(conn, limit=10)
+    assert {r["thread_id"] for r in queue} == {"t-ignore"}  # learned excluded
+    row = db.get_draft_outcome(conn, "a", "t-edit")
+    assert row["learned"] == 1 and row["learned_at_ms"] is not None
+    # limit is honored
+    assert len(db.unlearned_outcomes(conn, limit=0)) == 0
+
+
+def test_pending_outcomes_older_than(tmp_path) -> None:
+    conn = _db(tmp_path)
+    db.upsert_draft_outcome_draft(
+        conn, account="a", thread_id="t-old", sender_email="s", gmail_draft_id="d1",
+        draft_body="b",
+    )
+    db.upsert_draft_outcome_draft(
+        conn, account="a", thread_id="t-new", sender_email="s", gmail_draft_id="d2",
+        draft_body="b",
+    )
+    # push t-old's draft_created_ms into the past
+    conn.execute(
+        "UPDATE draft_outcomes SET draft_created_ms = 1000 WHERE thread_id = 't-old'"
+    )
+    conn.execute(
+        "UPDATE draft_outcomes SET draft_created_ms = 9_000_000_000_000 WHERE thread_id = 't-new'"
+    )
+    old = db.pending_outcomes_older_than(conn, before_ms=5000)
+    assert {r["thread_id"] for r in old} == {"t-old"}
+    # a row that's already classified (not pending) is never swept
+    db.record_draft_outcome_sent(
+        conn, account="a", thread_id="t-old", sender_email="s", sent_message_id="m",
+        sent_body="x", similarity=50, outcome="sent_edited",
+    )
+    assert db.pending_outcomes_older_than(conn, before_ms=5000) == []
+
+
+def test_recent_sent_examples_ordering_and_filtering(tmp_path) -> None:
+    conn = _db(tmp_path)
+    # three sent rows for bob with increasing sent_at_ms; one empty-body row is skipped
+    for tid, body, at in (("t1", "first", 100), ("t2", "second", 200), ("t3", "third", 300)):
+        db.record_draft_outcome_sent(
+            conn, account="a", thread_id=tid, sender_email="bob@y.com",
+            sent_message_id="m" + tid, sent_body=body, similarity=None, outcome="sent_no_draft",
+        )
+        conn.execute("UPDATE draft_outcomes SET sent_at_ms = ? WHERE thread_id = ?", (at, tid))
+    db.record_draft_outcome_sent(
+        conn, account="a", thread_id="t-empty", sender_email="bob@y.com",
+        sent_message_id="me", sent_body="", similarity=None, outcome="no_reply",
+    )
+    rows = db.recent_sent_examples(conn, "a", "bob@y.com", limit=2)
+    assert [r["sent_body"] for r in rows] == ["third", "second"]  # newest first, capped
+    # a different sender / account is independent
+    assert db.recent_sent_examples(conn, "a", "carol@z.com", limit=5) == []
+
+
+def test_count_outcomes_by_sender(tmp_path) -> None:
+    conn = _db(tmp_path)
+    for tid, outcome in (("t1", "sent_edited"), ("t2", "sent_edited"), ("t3", "no_reply")):
+        db.record_draft_outcome_sent(
+            conn, account="a", thread_id=tid, sender_email="bob@y.com",
+            sent_message_id="m" + tid, sent_body="b", similarity=None, outcome=outcome,
+        )
+    hist = db.count_outcomes_by_sender(conn, "a", "bob@y.com")
+    assert hist == {"sent_edited": 2, "no_reply": 1}
+    assert db.count_outcomes_by_sender(conn, "a", "nobody@z.com") == {}
+
+
+def test_delete_learned_outcomes_older_than(tmp_path) -> None:
+    conn = _db(tmp_path)
+    db.record_draft_outcome_sent(
+        conn, account="a", thread_id="t-keep", sender_email="s", sent_message_id="m1",
+        sent_body="b", similarity=None, outcome="sent_no_draft",
+    )
+    db.record_draft_outcome_sent(
+        conn, account="a", thread_id="t-old", sender_email="s", sent_message_id="m2",
+        sent_body="b", similarity=None, outcome="sent_edited",
+    )
+    db.mark_outcome_learned(conn, "a", "t-old")                       # learned + recent
+    conn.execute("UPDATE draft_outcomes SET updated_at_ms = 1000 WHERE thread_id = 't-old'")
+    # an unlearned row is never pruned even if old
+    conn.execute("UPDATE draft_outcomes SET updated_at_ms = 1000 WHERE thread_id = 't-keep'")
+    deleted = db.delete_learned_outcomes_older_than(conn, before_ms=5000)
+    assert deleted == 1
+    assert db.get_draft_outcome(conn, "a", "t-old") is None     # learned + old -> pruned
+    assert db.get_draft_outcome(conn, "a", "t-keep") is not None  # unlearned -> kept
+
+
+def test_learned_notes_isolated_from_voice_notes(tmp_path) -> None:
+    # AC6: upsert_learned_notes writes learned_notes ONLY; voice_notes/tone_hints stay.
+    conn = _db(tmp_path)
+    db.upsert_sender_profile(
+        conn, account="a", sender_email="bob@y.com",
+        voice_notes="backfilled voice", tone_hints="warm", source="backfill",
+    )
+    db.upsert_learned_notes(conn, "a", "bob@y.com", "refined: shorter, no greeting")
+    p = db.get_sender_profile(conn, "a", "bob@y.com")
+    assert p["learned_notes"] == "refined: shorter, no greeting"
+    assert p["voice_notes"] == "backfilled voice"   # untouched
+    assert p["tone_hints"] == "warm"                # untouched
+    assert p["learned_updated_ms"] is not None
+    # re-applying replaces (cumulative-bounded, not append)
+    db.upsert_learned_notes(conn, "a", "bob@y.com", "even shorter")
+    p = db.get_sender_profile(conn, "a", "bob@y.com")
+    assert p["learned_notes"] == "even shorter" and p["voice_notes"] == "backfilled voice"
+
+
+def test_upsert_learned_notes_creates_row_when_absent(tmp_path) -> None:
+    # a sender we've never backfilled can still accumulate learnings
+    conn = _db(tmp_path)
+    db.upsert_learned_notes(conn, "a", "new@z.com", "first learning")
+    p = db.get_sender_profile(conn, "a", "new@z.com")
+    assert p is not None and p["learned_notes"] == "first learning"
+    assert p["voice_notes"] is None
+
+
+def test_clear_learned_notes(tmp_path) -> None:
+    conn = _db(tmp_path)
+    db.upsert_sender_profile(
+        conn, account="a", sender_email="bob@y.com", voice_notes="keep me", source="backfill"
+    )
+    db.upsert_learned_notes(conn, "a", "bob@y.com", "drop me")
+    db.clear_learned_notes(conn, "a", "bob@y.com")
+    p = db.get_sender_profile(conn, "a", "bob@y.com")
+    assert p["learned_notes"] is None and p["voice_notes"] == "keep me"  # voice intact
+
+
+def test_upsert_lesson_dedup_and_evidence_bump(tmp_path) -> None:
+    conn = _db(tmp_path)
+    db.upsert_lesson(conn, account="a", scope="global", polarity="dont", rule="Don't be verbose")
+    db.upsert_lesson(conn, account="a", scope="global", polarity="dont", rule="don't be verbose")  # dup (norm)
+    rows = conn.execute("SELECT * FROM draft_lessons").fetchall()
+    assert len(rows) == 1  # deduped on norm_rule
+    assert rows[0]["evidence_count"] == 2
+    assert rows[0]["norm_rule"] == "don't be verbose"
+    # a different polarity / account / scope is a distinct lesson
+    db.upsert_lesson(conn, account="a", scope="global", polarity="do", rule="Don't be verbose")
+    db.upsert_lesson(conn, account="b", scope="global", polarity="dont", rule="Don't be verbose")
+    assert conn.execute("SELECT count(*) FROM draft_lessons").fetchone()[0] == 3
+
+
+def test_top_lessons_ranking_and_active_filter(tmp_path) -> None:
+    conn = _db(tmp_path)
+    db.upsert_lesson(conn, account="a", scope="global", polarity="do", rule="lesson A")
+    db.upsert_lesson(conn, account="a", scope="global", polarity="do", rule="lesson B")
+    db.upsert_lesson(conn, account="a", scope="global", polarity="do", rule="lesson B")  # B evidence=2
+    rows = db.top_lessons(conn, "a", limit=10)
+    assert [r["rule"] for r in rows] == ["lesson B", "lesson A"]  # by evidence DESC
+    # soft-disable A; it drops out
+    a_id = next(r["lesson_id"] for r in rows if r["rule"] == "lesson A")
+    db.set_lesson_active(conn, a_id, 0)
+    assert [r["rule"] for r in db.top_lessons(conn, "a", limit=10)] == ["lesson B"]
+    db.set_lesson_active(conn, a_id, 1)  # re-enable
+    assert len(db.top_lessons(conn, "a", limit=10)) == 2
+
+
+def test_prune_lessons_soft_evicts_lowest_value(tmp_path) -> None:
+    # AC10: keep the top `keep` by (evidence DESC, last_seen DESC); soft-evict the rest.
+    conn = _db(tmp_path)
+    for rule in ("l1", "l2", "l3", "l4"):
+        db.upsert_lesson(conn, account="a", scope="global", polarity="do", rule=rule)
+    # give l4 the most evidence so it's clearly kept; l1 stays weakest + oldest
+    db.upsert_lesson(conn, account="a", scope="global", polarity="do", rule="l4")
+    db.upsert_lesson(conn, account="a", scope="global", polarity="do", rule="l3")
+    evicted = db.prune_lessons(conn, "a", keep=2)
+    assert evicted == 2
+    kept = {r["rule"] for r in db.top_lessons(conn, "a", limit=10)}
+    assert kept == {"l4", "l3"}  # highest-evidence survive
+    # the evicted lessons are soft (active=0), not deleted
+    assert conn.execute("SELECT count(*) FROM draft_lessons").fetchone()[0] == 4
+    # pruning when already under cap is a no-op
+    assert db.prune_lessons(conn, "a", keep=10) == 0

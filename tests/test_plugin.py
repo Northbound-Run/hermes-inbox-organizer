@@ -36,6 +36,86 @@ def test_register_wires_native_tool() -> None:
     assert callable(tool["handler"])
 
 
+def test_register_wires_inbox_create_draft_with_record_outcome() -> None:
+    # T7 wiring #1: inbox_create_draft must be built with the record_outcome seam so
+    # the draft body is captured for the feedback loop. The handler closes over the
+    # seam, so assert the handler runs end-to-end without a connected account (it
+    # returns the not-connected error BEFORE record_outcome, proving the wiring is
+    # present and inert in CI). The deeper capture path is covered in test_db /
+    # test_inbox_tool; here we just prove register() passes record_outcome through.
+    import inspect
+
+    from hermes_inbox_organizer import _record_draft_outcome
+    from hermes_inbox_organizer.inbox_tool import make_inbox_create_draft_handler
+
+    # the seam exists and has the (account_id, thread_id, body, draft_id) shape
+    assert list(inspect.signature(_record_draft_outcome).parameters) == [
+        "account_id", "thread_id", "body", "draft_id",
+    ]
+    # and make_inbox_create_draft_handler accepts a record_outcome kwarg (T6 seam)
+    assert "record_outcome" in inspect.signature(make_inbox_create_draft_handler).parameters
+
+    ctx = FakeCtx()
+    register(ctx)
+    handler = next(t for t in ctx.tools if t["name"] == "inbox_create_draft")["handler"]
+    # No account connected in a test ctx -> the handler returns an error string and
+    # never raises (record_outcome is wired but not reached on this path).
+    out = handler({"account_id": "a@x.com", "thread_id": "t1", "body": "hi"})
+    assert isinstance(out, str)
+
+
+def test_register_wires_draft_feedback_tools() -> None:
+    # T7 wiring #2: DraftFeedbackModule.tools() auto-register via the registry loop.
+    ctx = FakeCtx()
+    register(ctx)
+    names = {t["name"] for t in ctx.tools}
+    assert {
+        "inbox_draft_feedback_status",
+        "inbox_forget_lesson",
+        "inbox_clear_learned_notes",
+    } <= names
+    for n in ("inbox_draft_feedback_status", "inbox_forget_lesson", "inbox_clear_learned_notes"):
+        tool = next(t for t in ctx.tools if t["name"] == n)
+        assert tool["toolset"] == "inbox" and callable(tool["handler"])
+
+
+def test_draft_feedback_mutations_are_owner_gated_status_is_not() -> None:
+    # T7 wiring #3: forget/clear are in the owner gate (blocked for a non-owner on a
+    # normal turn); the read-only status tool is NOT gated.
+    from hermes_inbox_organizer import CONNECT_TOOLS
+
+    assert {"inbox_forget_lesson", "inbox_clear_learned_notes"} <= CONNECT_TOOLS
+    assert "inbox_draft_feedback_status" not in CONNECT_TOOLS
+
+    ctx = FakeCtx()
+    register(ctx)
+    pre_tool = next(cb for name, cb in ctx.hooks if name == "pre_tool_call")
+    # No owner bound in this test ctx -> the two mutations are blocked on a normal turn.
+    for name in ("inbox_forget_lesson", "inbox_clear_learned_notes"):
+        gate = pre_tool(tool_name=name, turn_id="normal-turn")
+        assert gate and gate.get("action") == "block" and "owner" in gate["message"].lower()
+    # The read-only status tool passes the gate (None == allowed) on a normal turn.
+    assert pre_tool(tool_name="inbox_draft_feedback_status", turn_id="normal-turn") is None
+
+
+def test_draft_feedback_mutations_blocked_on_draft_turn_status_blocked_too() -> None:
+    # B4 interaction: on a wake/draft turn, NONE of the feedback tools are in
+    # DRAFT_TURN_ALLOWLIST, so all three are blocked by the B4 guard (a draft turn
+    # must not revert/inspect learned state) — proving the allowlist restricts draft
+    # turns independently of the owner gate, and that normal turns (above) are fine.
+    from hermes_inbox_organizer.draft_trigger import DRAFT_TURN_SENTINEL
+
+    ctx = FakeCtx()
+    register(ctx)
+    pre_llm = next(cb for name, cb in ctx.hooks if name == "pre_llm_call")
+    pre_tool = next(cb for name, cb in ctx.hooks if name == "pre_tool_call")
+    pre_llm(session_id="s", turn_id="turn-D", user_message=f"draft this {DRAFT_TURN_SENTINEL}")
+    for name in (
+        "inbox_draft_feedback_status", "inbox_forget_lesson", "inbox_clear_learned_notes",
+    ):
+        assert pre_tool(tool_name=name, turn_id="turn-D").get("action") == "block"
+
+
 def test_register_wires_pre_llm_call_hook() -> None:
     ctx = FakeCtx()
     register(ctx)

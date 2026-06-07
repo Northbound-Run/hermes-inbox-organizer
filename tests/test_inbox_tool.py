@@ -118,3 +118,53 @@ def test_handler_recorder_failure_does_not_break_tool() -> None:
     handler = make_inbox_create_draft_handler(lambda aid: FakeWriter(), record_draft=boom)
     out = json.loads(handler({"account_id": "a1", "thread_id": "t1", "body": "hi"}))
     assert out["ok"] is True  # recorder failure is logged, never raised out of the tool
+
+
+# ── record_outcome seam (draft-feedback-loop body capture) ──────────────────────
+
+def test_record_outcome_receives_account_thread_body_draft_id() -> None:
+    # The seam is called with (account_id, thread_id, body, draft_id) on success.
+    writer = FakeWriter()
+    captured: list[tuple] = []
+    handler = make_inbox_create_draft_handler(
+        lambda aid: writer,
+        record_outcome=lambda a, t, b, d: captured.append((a, t, b, d)),
+    )
+    out = json.loads(handler({"account_id": "a1", "thread_id": "t1", "body": "Hello there."}))
+    assert out["ok"] is True
+    assert captured == [("a1", "t1", "Hello there.", "draft-123")]
+
+
+def test_record_outcome_failure_does_not_break_tool() -> None:
+    # A record_outcome that raises must be swallowed; the tool still returns ok.
+    def boom(a, t, b, d):
+        raise RuntimeError("outcome db down")
+
+    handler = make_inbox_create_draft_handler(
+        lambda aid: FakeWriter(), record_outcome=boom
+    )
+    out = json.loads(handler({"account_id": "a1", "thread_id": "t1", "body": "hi"}))
+    assert out["ok"] is True
+
+
+def test_record_outcome_none_behaves_as_before() -> None:
+    # When record_outcome is not supplied (default None) the handler is unchanged.
+    writer = FakeWriter()
+    handler = make_inbox_create_draft_handler(lambda aid: writer)
+    out = json.loads(handler({"account_id": "a1", "thread_id": "t1", "body": "hi"}))
+    assert out == {"ok": True, "draft_id": "draft-123", "thread_id": "t1"}
+    assert writer.calls == [{"account_id": "a1", "thread_id": "t1", "body": "hi"}]
+
+
+def test_record_outcome_called_with_updated_draft_id() -> None:
+    # On a re-draft (update path), record_outcome receives the existing draft id.
+    writer = FakeWriterWithUpdate()
+    captured: list[tuple] = []
+    handler = make_inbox_create_draft_handler(
+        lambda aid: writer,
+        lookup_draft=lambda a, t: "existing-9",
+        record_outcome=lambda a, t, b, d: captured.append((a, t, b, d)),
+    )
+    out = json.loads(handler({"account_id": "a1", "thread_id": "t1", "body": "v2 body"}))
+    assert out["ok"] is True
+    assert captured == [("a1", "t1", "v2 body", "existing-9")]

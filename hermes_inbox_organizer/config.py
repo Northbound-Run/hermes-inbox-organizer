@@ -60,6 +60,16 @@ class Config:
     backfill_on_start: bool  # INBOX_BACKFILL_ON_START (default on)
     backfill_max_senders: int  # INBOX_BACKFILL_MAX_SENDERS (top-N recipients to profile)
     backfill_sample_per_sender: int  # INBOX_BACKFILL_SAMPLE_PER_SENDER (sent msgs sampled/sender)
+    # Draft reinforcement feedback loop: learn from draft→sent deltas.
+    draft_feedback_enabled: bool  # INBOX_DRAFT_FEEDBACK_ENABLED (default on)
+    draft_feedback_capture_all_sent: bool  # INBOX_DRAFT_FEEDBACK_CAPTURE_ALL_SENT (default on; seeds gold-example pool for non-drafted threads)
+    draft_feedback_no_reply_hours: int  # INBOX_DRAFT_FEEDBACK_NO_REPLY_HOURS (window before a pending outcome is marked no_reply; default 72)
+    draft_feedback_sweep_interval_s: int  # INBOX_DRAFT_FEEDBACK_SWEEP_INTERVAL_S (default 6 h)
+    draft_feedback_max_examples: int  # INBOX_DRAFT_FEEDBACK_MAX_EXAMPLES (gold examples injected into brief; default 3)
+    draft_feedback_max_lessons: int  # INBOX_DRAFT_FEEDBACK_MAX_LESSONS (lessons injected into brief; default 8)
+    draft_feedback_retention_days: int  # INBOX_DRAFT_FEEDBACK_RETENTION_DAYS (prune learned outcomes older than N days; default 90; 0 = off)
+    draft_feedback_verbatim_threshold: int  # INBOX_DRAFT_FEEDBACK_VERBATIM_THRESHOLD (similarity >= N → sent_verbatim; default 92)
+    draft_feedback_edit_threshold: int  # INBOX_DRAFT_FEEDBACK_EDIT_THRESHOLD (similarity >= N → sent_edited; else sent_ignored; default 45)
 
     def token_path(self, safe_email: str) -> str:
         """Path to an account's encrypted token file (``accounts/<email>.json``)."""
@@ -127,6 +137,15 @@ def get_config() -> Config:
         backfill_on_start=_env_bool("INBOX_BACKFILL_ON_START", True),
         backfill_max_senders=_env_int("INBOX_BACKFILL_MAX_SENDERS", 50),
         backfill_sample_per_sender=_env_int("INBOX_BACKFILL_SAMPLE_PER_SENDER", 15),
+        draft_feedback_enabled=_env_bool("INBOX_DRAFT_FEEDBACK_ENABLED", True),
+        draft_feedback_capture_all_sent=_env_bool("INBOX_DRAFT_FEEDBACK_CAPTURE_ALL_SENT", True),
+        draft_feedback_no_reply_hours=_env_int("INBOX_DRAFT_FEEDBACK_NO_REPLY_HOURS", 72),
+        draft_feedback_sweep_interval_s=_env_int("INBOX_DRAFT_FEEDBACK_SWEEP_INTERVAL_S", 6 * 3600),
+        draft_feedback_max_examples=_env_int("INBOX_DRAFT_FEEDBACK_MAX_EXAMPLES", 3),
+        draft_feedback_max_lessons=_env_int("INBOX_DRAFT_FEEDBACK_MAX_LESSONS", 8),
+        draft_feedback_retention_days=_env_int("INBOX_DRAFT_FEEDBACK_RETENTION_DAYS", 90),
+        draft_feedback_verbatim_threshold=_env_int("INBOX_DRAFT_FEEDBACK_VERBATIM_THRESHOLD", 92),
+        draft_feedback_edit_threshold=_env_int("INBOX_DRAFT_FEEDBACK_EDIT_THRESHOLD", 45),
     )
 
 

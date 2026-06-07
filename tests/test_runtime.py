@@ -447,3 +447,23 @@ def test_retry_skips_exhausted_and_fulfilled(tmp_path) -> None:
         db.set_draft_id(conn, "a@x.com", "t2", "d-2")  # fulfilled
     rt._retry_unfulfilled_drafts()
     assert woke == []
+
+
+def test_dedup_wake_falls_back_to_minimal_when_brief_build_fails(tmp_path, monkeypatch) -> None:
+    # A brief-build exception must NOT strand or un-restrict the wake: _build_brief
+    # returns None, so _dedup_wake dispatches instruction=None and wake_draft rebuilds the
+    # sentinel-bearing (restricted) fallback. Here we pin that None is passed through.
+    import hermes_inbox_organizer.brief as brief_mod
+
+    def _boom(*a, **k):
+        raise RuntimeError("brief build failed")
+
+    monkeypatch.setattr(brief_mod, "build_draft_brief", _boom)
+    woke: list = []
+    rt = InboxRuntime(
+        accounts=[], project="p", topic="t", subscription="s", sa_key_path="x",
+        db_path=_dbp(tmp_path), wake_fn=lambda **kw: woke.append(kw),
+    )
+    rt._dedup_wake(thread_id="t1", account_id="a", sender="s@x", subject="j")
+    assert len(woke) == 1
+    assert woke[0]["instruction"] is None  # fallback signal -> wake_draft rebuilds w/ sentinel

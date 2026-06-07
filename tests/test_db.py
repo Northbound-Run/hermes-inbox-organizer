@@ -124,6 +124,16 @@ def test_config_owner_ids_parsed(monkeypatch) -> None:
     config.reset_config()
 
 
+def test_config_wake_timeout_and_research(monkeypatch) -> None:
+    monkeypatch.setenv("INBOX_WAKE_TIMEOUT_S", "90")
+    monkeypatch.setenv("INBOX_DRAFT_RESEARCH", "off")
+    config.reset_config()
+    c = config.get_config()
+    assert c.wake_timeout_s == 90
+    assert c.draft_research_enabled is False
+    config.reset_config()
+
+
 def test_note_once_dedup_and_scoping(tmp_path) -> None:
     conn = _db(tmp_path)
     # First call records + returns True; repeats return False (deduped exactly once).

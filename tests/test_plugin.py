@@ -96,6 +96,48 @@ def test_end_to_end_fyi_is_silent() -> None:
     assert daemon.pending() == []
 
 
+def test_draft_turn_tool_allowlist_enforced_via_hooks() -> None:
+    # B4 (Phase 3): the REGISTERED hooks must actually restrict a wake/draft turn's
+    # toolset — exercises the real closures + the exact turn_id/user_message kwargs,
+    # not just the guard class in isolation.
+    from hermes_inbox_organizer.draft_trigger import DRAFT_TURN_SENTINEL
+
+    ctx = FakeCtx()
+    register(ctx)
+    pre_llm = next(cb for name, cb in ctx.hooks if name == "pre_llm_call")
+    pre_tool = next(cb for name, cb in ctx.hooks if name == "pre_tool_call")
+    post_llm = next(cb for name, cb in ctx.hooks if name == "post_llm_call")
+
+    # Before any draft turn, the draft guard blocks nothing.
+    assert pre_tool(tool_name="terminal", turn_id="turn-X") is None
+
+    # Simulate the wake turn: pre_llm_call sees the sentinel in the user_message.
+    pre_llm(session_id="s", turn_id="turn-X", user_message=f"draft this {DRAFT_TURN_SENTINEL}")
+
+    # Dangerous tools are now blocked for that turn_id; allowlisted ones pass.
+    assert pre_tool(tool_name="terminal", turn_id="turn-X").get("action") == "block"
+    assert pre_tool(tool_name="execute_code", turn_id="turn-X").get("action") == "block"
+    assert pre_tool(tool_name="browser_navigate", turn_id="turn-X").get("action") == "block"
+    assert pre_tool(tool_name="inbox_create_draft", turn_id="turn-X") is None
+    assert pre_tool(tool_name="web_search", turn_id="turn-X") is None
+
+    # A different (normal) turn is unaffected.
+    assert pre_tool(tool_name="terminal", turn_id="other-turn") is None
+
+    # A CONNECT/backfill tool is blocked on a draft turn (not in the allowlist) — proves
+    # B4 is enforced before (and independently of) the owner-gate.
+    assert pre_tool(tool_name="inbox_backfill_profiles", turn_id="turn-X").get("action") == "block"
+
+    # A NORMAL turn (no sentinel) still owner-gates connect tools (the B4 early-return
+    # didn't break the existing gate; no owner bound in this test -> blocked).
+    gate = pre_tool(tool_name="inbox_connect_account", turn_id="normal-turn")
+    assert gate and gate.get("action") == "block" and "owner" in gate["message"].lower()
+
+    # After the turn ends, the restriction is cleared.
+    post_llm(turn_id="turn-X")
+    assert pre_tool(tool_name="terminal", turn_id="turn-X") is None
+
+
 def test_register_wires_rollup_tool_via_registry() -> None:
     # Phase 2: the rollup tool is now contributed by RollupModule through the
     # registry, but the registered tool must be byte-identical to before.

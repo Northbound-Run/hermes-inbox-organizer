@@ -44,6 +44,8 @@ class Config:
     wake_model: Optional[str]
     hermes_api_url: Optional[str]
     api_server_key: Optional[str]
+    wake_timeout_s: int  # INBOX_WAKE_TIMEOUT_S (wake POST timeout; default 300)
+    draft_research_enabled: bool  # INBOX_DRAFT_RESEARCH (brief encourages research; default on)
     # Notifications (proactive push to the owner — see notifier.py).
     # OPTIONAL override; default destination is Hermes's /sethome home channel.
     notify_target: Optional[str]  # INBOX_NOTIFY_TARGET: a room/chat id, e.g. "!room:server"
@@ -113,6 +115,8 @@ def get_config() -> Config:
         wake_model=_env("INBOX_WAKE_MODEL"),
         hermes_api_url=_env("HERMES_API_URL"),
         api_server_key=_env("API_SERVER_KEY"),
+        wake_timeout_s=_env_int("INBOX_WAKE_TIMEOUT_S", 300),
+        draft_research_enabled=_env_bool("INBOX_DRAFT_RESEARCH", True),
         notify_target=_env("INBOX_NOTIFY_TARGET"),
         module_2fa_enabled=_env_bool("INBOX_2FA_ENABLED", True),
         twofa_sender_allowlist=frozenset(twofa_allow),

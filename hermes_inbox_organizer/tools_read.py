@@ -90,7 +90,9 @@ def make_inbox_get_thread_handler(resolve_reader: ResolveReader):
             thread = reader.get_thread(thread_id)
         except Exception as exc:
             return _err(f"get_thread failed: {exc}")
-        messages = [parse_message(m) for m in thread.get("messages", []) or []]
+        # Deeper read for drafting: 8000 chars/message. parse_message's shared default
+        # (4000, used by the classifier + rollup) is left untouched — call-site only.
+        messages = [parse_message(m, body_limit=8000) for m in thread.get("messages", []) or []]
         return json.dumps({"thread_id": thread_id, "messages": messages})
 
     return handler

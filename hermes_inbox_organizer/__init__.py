@@ -28,6 +28,7 @@ from typing import Any, Optional
 
 from .background import InboundMessage, InboxDaemon, NullSource
 from .draft_trigger import (
+    DRAFT_TURN_SENTINEL,
     DraftTrigger,
     GatewayInjectionDispatcher,
     pending_drafts_context,
@@ -70,6 +71,62 @@ CONNECT_TOOLS = {
     "inbox_disconnect_account",
     "inbox_backfill_profiles",  # owner-only: expensive LLM backfill, never from a draft turn
 }
+
+# Tools an autonomous draft (wake) turn may use — DEFAULT-DENY everything else
+# (terminal/exec/file/browser/messaging/cronjob/delegate/memory/...). The B4 security
+# control: a wake turn runs Hermes's FULL agent loop with its full toolset, so we
+# restrict it at the pre_tool_call hook (which fires on the wake/api_server path) to
+# the inbox + read-only research tools.
+DRAFT_TURN_ALLOWLIST = {
+    # inbox-domain (our own, safe): read mail/history, read+refine voice, create draft
+    "inbox_get_thread", "inbox_get_email", "inbox_list_emails", "inbox_list_accounts",
+    "inbox_get_sender_profile", "inbox_save_sender_profile", "inbox_create_draft",
+    # read-only research (Hermes-native)
+    "web_search", "web_extract", "session_search",
+}
+
+
+class _DraftTurnGuard:
+    """Restricts autonomous draft (wake) turns to ``DRAFT_TURN_ALLOWLIST``.
+
+    A wake instruction carries ``DRAFT_TURN_SENTINEL``; :meth:`note` records that
+    turn's ``turn_id`` (from ``pre_llm_call``), :meth:`blocked` is consulted by
+    ``pre_tool_call``, and :meth:`clear` removes it on ``post_llm_call``. ``turn_id``s
+    are unique per turn, so a leaked id (an interrupted turn never reaches
+    ``post_llm_call``) can never cause a false block — the FIFO cap only bounds memory.
+
+    Relies on Hermes passing the SAME ``turn_id`` to pre_llm_call/pre_tool_call (verified
+    against the run_conversation loop in Phase 0). The brief's prose guardrail is the
+    backstop if a future Hermes ever dispatches a wake turn's tools without a turn_id
+    (empty turn_id -> blocked() no-ops). Re-verify this on Hermes upgrades.
+    """
+
+    _MAX = 512
+
+    def __init__(self, allowlist: set) -> None:
+        self._allowlist = allowlist
+        self._turns: dict[str, bool] = {}  # insertion-ordered; FIFO-evicted
+        self._lock = threading.Lock()
+
+    def note(self, turn_id: Optional[str], user_message: Optional[str]) -> None:
+        if not turn_id or not user_message or DRAFT_TURN_SENTINEL not in user_message:
+            return
+        with self._lock:
+            self._turns[turn_id] = True
+            while len(self._turns) > self._MAX:
+                self._turns.pop(next(iter(self._turns)))  # evict oldest (already completed)
+
+    def clear(self, turn_id: Optional[str]) -> None:
+        if turn_id:
+            with self._lock:
+                self._turns.pop(turn_id, None)
+
+    def blocked(self, turn_id: Optional[str], tool_name: Optional[str]) -> bool:
+        if not turn_id:
+            return False
+        with self._lock:
+            active = turn_id in self._turns
+        return active and tool_name not in self._allowlist
 
 
 class _GatewayCapture:
@@ -209,7 +266,10 @@ def register(ctx: Any) -> InboxDaemon:
     # 1d. The on-demand unread rollup is now a Module (see modules/rollup.py); it
     # contributes the inbox_unread_rollup tool through the registry below.
 
-    # 2. Capture the gateway for synthetic-injection drafting; build the daemon.
+    # 2. Capture the gateway + build the daemon. NB: the LIVE autonomous draft path is
+    # the HTTP wake (wake_draft -> /v1/chat/completions, wired in _maybe_start_runtime).
+    # This GatewayInjectionDispatcher + the InboxDaemon (NullSource, inert) are reachable
+    # only via the /inboxprobe diagnostic — kept for that, not the production loop.
     capture = _GatewayCapture()
     dispatcher = GatewayInjectionDispatcher(
         get_gateway=lambda: capture.gateway,
@@ -280,6 +340,8 @@ def register(ctx: Any) -> InboxDaemon:
 
     # 3. Hooks: capture the gateway, bind sender→session per turn, nudge, owner-gate.
     if hasattr(ctx, "register_hook"):
+        # B4: restrict autonomous draft (wake) turns to the inbox + research toolset.
+        draft_guard = _DraftTurnGuard(DRAFT_TURN_ALLOWLIST)
 
         def _on_pre_gateway_dispatch(**kw: Any):
             capture.on_pre_gateway_dispatch(**kw)
@@ -292,6 +354,7 @@ def register(ctx: Any) -> InboxDaemon:
 
         def _on_pre_llm_call(**kw: Any):
             auth.bind_session(kw.get("session_id"))
+            draft_guard.note(kw.get("turn_id"), kw.get("user_message"))  # B4: flag draft turns
             parts: list[str] = []
             drafts = pending_drafts_context(daemon.pending())
             if drafts and drafts.get("context"):
@@ -306,9 +369,26 @@ def register(ctx: Any) -> InboxDaemon:
 
         ctx.register_hook("pre_llm_call", _on_pre_llm_call)
 
+        def _on_post_llm_call(**kw: Any):
+            draft_guard.clear(kw.get("turn_id"))  # B4: draft turn finished
+            return None
+
+        ctx.register_hook("post_llm_call", _on_post_llm_call)
+
         def _on_pre_tool_call(**kw: Any):
-            if kw.get("tool_name") not in CONNECT_TOOLS:
-                return None  # only gate the onboarding tools
+            tool = kw.get("tool_name")
+            # B4 (most restrictive, checked first): a draft/wake turn may use ONLY the
+            # inbox + read-only research tools — block terminal/exec/file/browser/etc.
+            if draft_guard.blocked(kw.get("turn_id"), tool):
+                return {
+                    "action": "block",
+                    "message": (
+                        f"'{tool}' is not permitted during an autonomous draft turn "
+                        "(inbox + read-only research tools only)."
+                    ),
+                }
+            if tool not in CONNECT_TOOLS:
+                return None  # only gate the onboarding/backfill tools
             sender = auth.sender_for(kw.get("task_id") or kw.get("session_id"))
             if not auth.is_owner(sender):
                 return {

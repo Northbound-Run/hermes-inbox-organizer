@@ -5,13 +5,16 @@ from __future__ import annotations
 import pytest
 
 from hermes_inbox_organizer.draft_trigger import (
+    DRAFT_TURN_SENTINEL,
     DraftTrigger,
     FakeDispatcher,
     GatewayInjectionDispatcher,
+    HttpMessagePoster,
     HttpWakeDispatcher,
     NoopPoster,
     build_draft_instruction,
     pending_drafts_context,
+    wake_draft,
 )
 
 
@@ -88,3 +91,47 @@ def test_pending_context_none_when_empty_and_lists_threads() -> None:
     assert ctx is not None
     assert "t1" in ctx["context"] and "t2" in ctx["context"]
     assert "inbox_create_draft" in ctx["context"]
+
+
+def test_instruction_carries_sentinel_and_guardrail() -> None:
+    text = build_draft_instruction(account_id="a", thread_id="t", sender="s@x", subject="j")
+    assert DRAFT_TURN_SENTINEL in text   # so even the fallback wake is recognized + restricted (B4)
+    assert "untrusted" in text.lower()   # guardrail present on the fallback path too
+    assert "inbox_create_draft" in text
+
+
+def test_http_poster_uses_configured_timeout(monkeypatch) -> None:
+    # AC13: the wake POST uses the (config-supplied) timeout, not a hardcoded 300.
+    import urllib.request
+
+    captured: dict = {}
+
+    class _Resp:
+        status = 200
+
+        def read(self):
+            return b"{}"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None):  # noqa: ANN001
+        captured["timeout"] = timeout
+        return _Resp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    HttpMessagePoster("http://localhost:8642", "key", "model", timeout=123).post("hi")
+    assert captured["timeout"] == 123
+
+
+def test_wake_draft_fallback_instruction_carries_sentinel() -> None:
+    # When no brief is supplied (instruction=None), wake_draft rebuilds the minimal
+    # instruction — which must STILL carry the sentinel so the turn is restricted (B4).
+    poster = NoopPoster()
+    wake_draft(
+        account_id="a", thread_id="t", sender="s@x", subject="j", instruction=None, poster=poster
+    )
+    assert poster.posted and DRAFT_TURN_SENTINEL in poster.posted[0]

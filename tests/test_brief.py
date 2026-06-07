@@ -6,6 +6,7 @@ import re
 
 from hermes_inbox_organizer import db
 from hermes_inbox_organizer.brief import build_draft_brief
+from hermes_inbox_organizer.draft_trigger import DRAFT_TURN_SENTINEL
 
 
 def _conn(tmp_path):
@@ -87,3 +88,23 @@ def test_brief_history_excludes_other_senders(tmp_path) -> None:
         conn, account_id="a@x.com", thread_id="t1", sender="bob@y.com", subject="Hi"
     )
     assert "Prior mail" not in out  # no history for bob specifically
+
+
+def test_brief_has_guardrail_research_and_sentinel(tmp_path) -> None:
+    conn = _conn(tmp_path)
+    out = build_draft_brief(
+        conn, account_id="a@x.com", thread_id="t1", sender="bob@y.com", subject="Hi"
+    )
+    assert "untrusted" in out.lower()       # AC12b security guardrail
+    assert "inbox_create_draft" in out
+    assert "inbox_list_emails" in out       # AC12a research-first directive (default on)
+    assert DRAFT_TURN_SENTINEL in out       # drives the pre_tool_call restriction (B4)
+
+
+def test_brief_research_directive_can_be_disabled(tmp_path) -> None:
+    conn = _conn(tmp_path)
+    out = build_draft_brief(
+        conn, account_id="a@x.com", thread_id="t1", sender="bob@y.com", subject="Hi", research=False
+    )
+    assert "Before drafting, gather" not in out                       # research directive omitted
+    assert DRAFT_TURN_SENTINEL in out and "untrusted" in out.lower()  # guardrail + sentinel stay

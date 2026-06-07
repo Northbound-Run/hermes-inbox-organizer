@@ -62,6 +62,16 @@ def test_get_thread_returns_parsed_messages() -> None:
     assert [m["body"] for m in out["messages"]] == ["first", "second"]
 
 
+def test_get_thread_uses_deeper_body_limit_for_drafting() -> None:
+    # N3: inbox_get_thread reads 8000 chars/message (vs the shared 4000 default) so deep
+    # threads aren't over-truncated when drafting.
+    long_body = "x" * 6000  # > 4000 default, < 8000 draft limit
+    thread = {"messages": [_msg("m1", "a@x.com", "Hi", long_body)]}
+    handler = make_inbox_get_thread_handler(lambda aid: FakeReader(thread=thread))
+    out = json.loads(handler({"account_id": "a1", "thread_id": "t1"}))
+    assert len(out["messages"][0]["body"]) == 6000  # not truncated at 4000
+
+
 def test_get_thread_reports_not_connected() -> None:
     handler = make_inbox_get_thread_handler(lambda aid: None)
     out = json.loads(handler({"account_id": "a1", "thread_id": "t1"}))

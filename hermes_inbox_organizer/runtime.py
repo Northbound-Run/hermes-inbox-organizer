@@ -175,8 +175,12 @@ class InboxRuntime:
         """Context-rich wake instruction; falls back to the minimal one (None) on failure."""
         try:
             from .brief import build_draft_brief
+            from .config import get_config
 
-            return build_draft_brief(conn, account_id=acct, thread_id=tid, sender=sender, subject=subject)
+            return build_draft_brief(
+                conn, account_id=acct, thread_id=tid, sender=sender, subject=subject,
+                research=get_config().draft_research_enabled,
+            )
         except Exception:
             logger.exception("inbox runtime: brief build failed for thread %s; using minimal wake", tid)
             return None

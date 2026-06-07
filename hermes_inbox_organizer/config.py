@@ -50,6 +50,10 @@ class Config:
     # Modules
     module_2fa_enabled: bool  # INBOX_2FA_ENABLED (default on)
     twofa_sender_allowlist: frozenset  # INBOX_2FA_SENDER_ALLOWLIST (lowercased addrs/domains; empty = push all)
+    module_shipping_enabled: bool  # INBOX_SHIPPING_ENABLED (default on)
+    track17_key_file: str  # config-mount path to the 17track API key
+    shipping_poll_interval_s: int  # INBOX_SHIPPING_POLL_INTERVAL_S (default 4h)
+    shipping_max_active: int  # INBOX_SHIPPING_MAX_ACTIVE (cap on concurrently-tracked parcels)
 
     def token_path(self, safe_email: str) -> str:
         """Path to an account's encrypted token file (``accounts/<email>.json``)."""
@@ -66,6 +70,13 @@ def _env_bool(name: str, default: bool) -> bool:
     if val is None:
         return default
     return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ[name])
+    except (KeyError, ValueError):
+        return default
 
 
 @lru_cache(maxsize=1)
@@ -101,6 +112,10 @@ def get_config() -> Config:
         notify_target=_env("INBOX_NOTIFY_TARGET"),
         module_2fa_enabled=_env_bool("INBOX_2FA_ENABLED", True),
         twofa_sender_allowlist=frozenset(twofa_allow),
+        module_shipping_enabled=_env_bool("INBOX_SHIPPING_ENABLED", True),
+        track17_key_file=cfg("INBOX_17TRACK_KEY_FILE", "inbox-17track-key"),
+        shipping_poll_interval_s=_env_int("INBOX_SHIPPING_POLL_INTERVAL_S", 4 * 3600),
+        shipping_max_active=_env_int("INBOX_SHIPPING_MAX_ACTIVE", 50),
     )
 
 

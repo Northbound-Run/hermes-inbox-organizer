@@ -320,12 +320,15 @@ def _build_modules(notifier: DeliveryNotifier) -> list:
     from . import rollup as _rollup
     from .config import get_config
     from .modules.rollup import RollupModule
+    from .modules.shipping import ShippingModule
+    from .modules.track17 import HttpTrack17Client
     from .modules.twofa import TwoFactorModule
 
     # Share the reconnect set BY REFERENCE so a dead token hit during a rollup
     # surfaces the same reconnect nudge as the runtime/onboarding paths.
     _rollup._NEEDS_RECONNECT = _NEEDS_RECONNECT
     cfg = get_config()
+    track_key = _read_17track_key(cfg)
     return [
         RollupModule(
             resolve_accounts=_resolve_rollup_accounts,
@@ -336,7 +339,25 @@ def _build_modules(notifier: DeliveryNotifier) -> list:
             enabled=cfg.module_2fa_enabled,
             sender_allowlist=cfg.twofa_sender_allowlist,
         ),
+        ShippingModule(
+            notifier=notifier,
+            client=HttpTrack17Client(track_key) if track_key else None,
+            enabled=cfg.module_shipping_enabled,
+            max_active=cfg.shipping_max_active,
+            poll_interval_s=cfg.shipping_poll_interval_s,
+        ),
     ]
+
+
+def _read_17track_key(cfg: Any) -> Optional[str]:
+    """Read the 17track API key from the read-only config mount (None if absent)."""
+    try:
+        if os.path.exists(cfg.track17_key_file):
+            with open(cfg.track17_key_file) as f:
+                return f.read().strip() or None
+    except Exception:
+        logger.exception("inbox: failed to read 17track key file")
+    return None
 
 
 def _maybe_start_runtime(registry: Any = None):

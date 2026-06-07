@@ -89,6 +89,25 @@ CREATE TABLE IF NOT EXISTS module_notified (
     notified_at_ms  INTEGER NOT NULL,
     PRIMARY KEY (module, account, dedup_key)
 );
+
+-- Packages the shipping module is tracking via 17track. Polled (no webhooks:
+-- no public ingress). ``last_notified_stage`` advances ONLY after a successful
+-- push (so a failed notify re-fires next poll). ``terminal`` (delivered /
+-- exception / expired) drops a parcel out of the poll set. Keyed on
+-- (account, tracking_number) so repeat emails about the same parcel are no-ops.
+CREATE TABLE IF NOT EXISTS tracked_packages (
+    account              TEXT NOT NULL,
+    tracking_number      TEXT NOT NULL,
+    carrier              INTEGER,                      -- 17track carrier id; NULL = auto-detect
+    registered           INTEGER NOT NULL DEFAULT 0,   -- 1 once 17track accepted it
+    last_stage           TEXT,                         -- normalized stage from the last poll
+    last_notified_stage  TEXT,                         -- last stage actually pushed (B3)
+    terminal             INTEGER NOT NULL DEFAULT 0,   -- stop polling
+    created_at_ms        INTEGER NOT NULL,
+    updated_at_ms        INTEGER NOT NULL,
+    PRIMARY KEY (account, tracking_number)
+);
+CREATE INDEX IF NOT EXISTS idx_pkg_active ON tracked_packages (registered, terminal);
 """
 
 _INITIALIZED_PATHS: set[str] = set()
@@ -283,3 +302,92 @@ def was_notified(conn: sqlite3.Connection, module: str, account: str, dedup_key:
         "SELECT 1 FROM module_notified WHERE module = ? AND account = ? AND dedup_key = ?",
         (module, account, dedup_key),
     ).fetchone() is not None
+
+
+# ── Tracked packages (shipping module) ───────────────────────────────────────
+
+def add_tracked_package(
+    conn: sqlite3.Connection, account: str, tracking_number: str, carrier: Optional[int] = None
+) -> bool:
+    """Insert a newly-detected parcel; True iff new (repeat emails are no-ops)."""
+    cur = conn.execute(
+        """INSERT OR IGNORE INTO tracked_packages
+               (account, tracking_number, carrier, created_at_ms, updated_at_ms)
+               VALUES (?, ?, ?, ?, ?)""",
+        (account, tracking_number, carrier, now_ms(), now_ms()),
+    )
+    return cur.rowcount == 1
+
+
+def mark_package_registered(
+    conn: sqlite3.Connection, account: str, tracking_number: str, carrier: Optional[int] = None
+) -> None:
+    """Flag a parcel as accepted by 17track (and record the resolved carrier)."""
+    conn.execute(
+        """UPDATE tracked_packages
+              SET registered = 1,
+                  carrier = COALESCE(?, carrier),
+                  updated_at_ms = ?
+            WHERE account = ? AND tracking_number = ?""",
+        (carrier, now_ms(), account, tracking_number),
+    )
+
+
+def count_active_packages(conn: sqlite3.Connection) -> int:
+    """Registered, non-terminal parcels — the live poll set size (for the cap)."""
+    return conn.execute(
+        "SELECT count(*) FROM tracked_packages WHERE registered = 1 AND terminal = 0"
+    ).fetchone()[0]
+
+
+def get_active_packages(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Registered, non-terminal parcels across all accounts (the poll set)."""
+    return conn.execute(
+        "SELECT * FROM tracked_packages WHERE registered = 1 AND terminal = 0"
+    ).fetchall()
+
+
+def update_package_stage(
+    conn: sqlite3.Connection,
+    account: str,
+    tracking_number: str,
+    stage: str,
+    *,
+    terminal: bool = False,
+) -> None:
+    """Record the latest polled stage (and whether the parcel is now terminal)."""
+    conn.execute(
+        """UPDATE tracked_packages
+              SET last_stage = ?, terminal = ?, updated_at_ms = ?
+            WHERE account = ? AND tracking_number = ?""",
+        (stage, 1 if terminal else 0, now_ms(), account, tracking_number),
+    )
+
+
+def set_package_notified_stage(
+    conn: sqlite3.Connection, account: str, tracking_number: str, stage: str
+) -> None:
+    """Record the stage we actually pushed (advanced only after a successful send)."""
+    conn.execute(
+        """UPDATE tracked_packages
+              SET last_notified_stage = ?, updated_at_ms = ?
+            WHERE account = ? AND tracking_number = ?""",
+        (stage, now_ms(), account, tracking_number),
+    )
+
+
+def list_tracked_packages(
+    conn: sqlite3.Connection, account: Optional[str] = None, *, include_terminal: bool = False
+) -> list[sqlite3.Row]:
+    """Tracked parcels for the on-demand tool (optionally scoped / incl. delivered)."""
+    sql = "SELECT * FROM tracked_packages"
+    clauses, params = [], []
+    if account:
+        clauses.append("account = ?")
+        params.append(account)
+    if not include_terminal:
+        clauses.append("terminal = 0")
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY updated_at_ms DESC"
+    return conn.execute(sql, params).fetchall()

@@ -254,7 +254,7 @@ def distill_and_apply(
     conn: sqlite3.Connection,
     *,
     account: str,
-    outcome_row: sqlite3.Row,
+    outcome_row: db.DraftOutcomeRow,
     classify_fn: ClassifyFn = llm.classify_json,
 ) -> None:
     """Distil one ``draft_outcomes`` row into the learned layer and mark it learned.

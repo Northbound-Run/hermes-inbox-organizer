@@ -22,9 +22,104 @@ from __future__ import annotations
 import sqlite3
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, TypedDict, cast
 
 from .config import get_config
+
+# ── Row shapes ────────────────────────────────────────────────────────────────
+# Row-returning accessors hand back plain dicts (one per row), typed with these
+# TypedDicts, so call sites get static key-checking + autocomplete on row["col"]
+# without taking on an ORM dependency. The DB still uses sqlite3.Row internally
+# (``connect`` sets row_factory); :func:`_as_dict`/:func:`_as_dicts` convert at the
+# accessor boundary. ``Optional[...]`` marks columns that are NULLable in the schema.
+# (Editor-level today — no type checker is wired in CI; see README/dev notes.)
+
+
+class DraftRequestRow(TypedDict):
+    account: str
+    thread_id: str
+    gmail_draft_id: Optional[str]
+    from_addr: Optional[str]
+    subject: Optional[str]
+    attempts: int
+    last_attempt_ms: Optional[int]
+    created_at_ms: int
+
+
+class ThreadStateRow(TypedDict):
+    account: str
+    thread_id: str
+    last_message_id: str
+    last_category: str
+    last_processed_at_ms: int
+
+
+class SenderProfileRow(TypedDict):
+    account: str
+    sender_email: str
+    display_name: Optional[str]
+    relationship: Optional[str]
+    voice_notes: Optional[str]
+    tone_hints: Optional[str]
+    learned_notes: Optional[str]
+    learned_updated_ms: Optional[int]
+    draft_count: int
+    last_drafted_at_ms: Optional[int]
+    source: Optional[str]
+    updated_at_ms: int
+
+
+class DraftOutcomeRow(TypedDict):
+    account: str
+    thread_id: str
+    sender_email: Optional[str]
+    gmail_draft_id: Optional[str]
+    draft_body: Optional[str]
+    draft_created_ms: Optional[int]
+    sent_message_id: Optional[str]
+    sent_body: Optional[str]
+    sent_at_ms: Optional[int]
+    outcome: str
+    similarity: Optional[int]
+    learned: int
+    learned_at_ms: Optional[int]
+    updated_at_ms: int
+
+
+class DraftLessonRow(TypedDict):
+    lesson_id: int
+    account: str
+    scope: str
+    polarity: str
+    rule: str
+    norm_rule: str
+    evidence_count: int
+    active: int
+    created_at_ms: int
+    last_seen_ms: int
+
+
+class TrackedPackageRow(TypedDict):
+    account: str
+    tracking_number: str
+    carrier: Optional[int]
+    registered: int
+    last_stage: Optional[str]
+    last_notified_stage: Optional[str]
+    terminal: int
+    created_at_ms: int
+    updated_at_ms: int
+
+
+def _as_dict(row: Optional[sqlite3.Row]) -> Optional[dict[str, Any]]:
+    """sqlite3.Row -> plain dict (or None), the single-row accessor boundary."""
+    return dict(row) if row is not None else None
+
+
+def _as_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    """sqlite3.Row list -> list of plain dicts, the multi-row accessor boundary."""
+    return [dict(r) for r in rows]
+
 
 _SCHEMA_VERSION = 3
 
@@ -306,12 +401,15 @@ def set_draft_id(conn: sqlite3.Connection, account: str, thread_id: str, gmail_d
     )
 
 
-def get_draft_request(conn: sqlite3.Connection, account: str, thread_id: str) -> Optional[sqlite3.Row]:
+def get_draft_request(
+    conn: sqlite3.Connection, account: str, thread_id: str
+) -> Optional[DraftRequestRow]:
     """The draft_requests row for a thread, or None."""
-    return conn.execute(
+    row = conn.execute(
         "SELECT * FROM draft_requests WHERE account = ? AND thread_id = ?",
         (account, thread_id),
     ).fetchone()
+    return cast("Optional[DraftRequestRow]", _as_dict(row))
 
 
 def claim_draft(
@@ -366,9 +464,9 @@ def claim_draft(
 
 def unfulfilled_drafts(
     conn: sqlite3.Connection, *, ttl_ms: int, max_attempts: int, now_ms: int
-) -> list[sqlite3.Row]:
+) -> list[DraftRequestRow]:
     """Rows eligible for a retry: no draft yet, under max attempts, past the ttl window."""
-    return conn.execute(
+    rows = conn.execute(
         """SELECT * FROM draft_requests
             WHERE gmail_draft_id IS NULL
               AND attempts < ?
@@ -376,15 +474,17 @@ def unfulfilled_drafts(
             ORDER BY created_at_ms""",
         (max_attempts, now_ms, ttl_ms),
     ).fetchall()
+    return cast("list[DraftRequestRow]", _as_dicts(rows))
 
 
-def exhausted_drafts(conn: sqlite3.Connection, *, max_attempts: int) -> list[sqlite3.Row]:
+def exhausted_drafts(conn: sqlite3.Connection, *, max_attempts: int) -> list[DraftRequestRow]:
     """Stuck drafts: max attempts reached with no draft created (durable, queryable state)."""
-    return conn.execute(
+    rows = conn.execute(
         "SELECT * FROM draft_requests WHERE gmail_draft_id IS NULL AND attempts >= ? "
         "ORDER BY created_at_ms",
         (max_attempts,),
     ).fetchall()
+    return cast("list[DraftRequestRow]", _as_dicts(rows))
 
 
 # ── Classified messages ─────────────────────────────────────────────────────────
@@ -447,23 +547,27 @@ def upsert_thread_state(
     )
 
 
-def get_thread_state(conn: sqlite3.Connection, account: str, thread_id: str) -> Optional[sqlite3.Row]:
-    return conn.execute(
+def get_thread_state(
+    conn: sqlite3.Connection, account: str, thread_id: str
+) -> Optional[ThreadStateRow]:
+    row = conn.execute(
         "SELECT * FROM thread_state WHERE account = ? AND thread_id = ?",
         (account, thread_id),
     ).fetchone()
+    return cast("Optional[ThreadStateRow]", _as_dict(row))
 
 
 # ── Sender profiles (voice/relationship for the drafting brief) ───────────────────
 
 def get_sender_profile(
     conn: sqlite3.Connection, account: str, sender_email: str
-) -> Optional[sqlite3.Row]:
+) -> Optional[SenderProfileRow]:
     """The profile row for a (normalized) sender, or None."""
-    return conn.execute(
+    row = conn.execute(
         "SELECT * FROM sender_profiles WHERE account = ? AND sender_email = ?",
         (account, sender_email),
     ).fetchone()
+    return cast("Optional[SenderProfileRow]", _as_dict(row))
 
 
 def upsert_sender_profile(
@@ -613,39 +717,42 @@ def record_draft_outcome_sent(
 
 def get_draft_outcome(
     conn: sqlite3.Connection, account: str, thread_id: str
-) -> Optional[sqlite3.Row]:
+) -> Optional[DraftOutcomeRow]:
     """The draft_outcomes row for a thread, or None."""
-    return conn.execute(
+    row = conn.execute(
         "SELECT * FROM draft_outcomes WHERE account = ? AND thread_id = ?",
         (account, thread_id),
     ).fetchone()
+    return cast("Optional[DraftOutcomeRow]", _as_dict(row))
 
 
-def unlearned_outcomes(conn: sqlite3.Connection, *, limit: int) -> list[sqlite3.Row]:
+def unlearned_outcomes(conn: sqlite3.Connection, *, limit: int) -> list[DraftOutcomeRow]:
     """Rows ready to distill: classified (not ``pending``) but not yet ``learned``.
 
     The distill queue (and the sweep's belt-and-suspenders retry for an ``on_sent``
     distill that failed). Oldest first so a backlog drains in order.
     """
-    return conn.execute(
+    rows = conn.execute(
         """SELECT * FROM draft_outcomes
             WHERE learned = 0 AND outcome != 'pending'
             ORDER BY updated_at_ms
             LIMIT ?""",
         (limit,),
     ).fetchall()
+    return cast("list[DraftOutcomeRow]", _as_dicts(rows))
 
 
 def pending_outcomes_older_than(
     conn: sqlite3.Connection, *, before_ms: int
-) -> list[sqlite3.Row]:
+) -> list[DraftOutcomeRow]:
     """``pending`` drafted rows whose draft is older than ``before_ms`` (no-reply sweep)."""
-    return conn.execute(
+    rows = conn.execute(
         """SELECT * FROM draft_outcomes
             WHERE outcome = 'pending' AND draft_created_ms IS NOT NULL AND draft_created_ms <= ?
             ORDER BY draft_created_ms""",
         (before_ms,),
     ).fetchall()
+    return cast("list[DraftOutcomeRow]", _as_dicts(rows))
 
 
 def mark_outcome_learned(conn: sqlite3.Connection, account: str, thread_id: str) -> None:
@@ -660,9 +767,9 @@ def mark_outcome_learned(conn: sqlite3.Connection, account: str, thread_id: str)
 
 def recent_sent_examples(
     conn: sqlite3.Connection, account: str, sender_email: str, *, limit: int
-) -> list[sqlite3.Row]:
+) -> list[DraftOutcomeRow]:
     """Gold examples for a sender: rows with a non-empty ``sent_body``, newest first."""
-    return conn.execute(
+    rows = conn.execute(
         """SELECT * FROM draft_outcomes
             WHERE account = ? AND sender_email = ?
               AND sent_body IS NOT NULL AND sent_body != ''
@@ -670,6 +777,7 @@ def recent_sent_examples(
             LIMIT ?""",
         (account, sender_email, limit),
     ).fetchall()
+    return cast("list[DraftOutcomeRow]", _as_dicts(rows))
 
 
 def count_outcomes_by_sender(
@@ -732,15 +840,16 @@ def upsert_lesson(
 
 def top_lessons(
     conn: sqlite3.Connection, account: str, *, limit: int
-) -> list[sqlite3.Row]:
+) -> list[DraftLessonRow]:
     """Active lessons for an account, ranked by evidence then recency (brief + status)."""
-    return conn.execute(
+    rows = conn.execute(
         """SELECT * FROM draft_lessons
             WHERE account = ? AND active = 1
             ORDER BY evidence_count DESC, last_seen_ms DESC
             LIMIT ?""",
         (account, limit),
     ).fetchall()
+    return cast("list[DraftLessonRow]", _as_dicts(rows))
 
 
 def prune_lessons(conn: sqlite3.Connection, account: str, *, keep: int) -> int:
@@ -834,11 +943,12 @@ def count_active_packages(conn: sqlite3.Connection) -> int:
     ).fetchone()[0]
 
 
-def get_active_packages(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+def get_active_packages(conn: sqlite3.Connection) -> list[TrackedPackageRow]:
     """Registered, non-terminal parcels across all accounts (the poll set)."""
-    return conn.execute(
+    rows = conn.execute(
         "SELECT * FROM tracked_packages WHERE registered = 1 AND terminal = 0"
     ).fetchall()
+    return cast("list[TrackedPackageRow]", _as_dicts(rows))
 
 
 def update_package_stage(
@@ -872,7 +982,7 @@ def set_package_notified_stage(
 
 def list_tracked_packages(
     conn: sqlite3.Connection, account: Optional[str] = None, *, include_terminal: bool = False
-) -> list[sqlite3.Row]:
+) -> list[TrackedPackageRow]:
     """Tracked parcels for the on-demand tool (optionally scoped / incl. delivered)."""
     sql = "SELECT * FROM tracked_packages"
     clauses, params = [], []
@@ -884,4 +994,4 @@ def list_tracked_packages(
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
     sql += " ORDER BY updated_at_ms DESC"
-    return conn.execute(sql, params).fetchall()
+    return cast("list[TrackedPackageRow]", _as_dicts(conn.execute(sql, params).fetchall()))

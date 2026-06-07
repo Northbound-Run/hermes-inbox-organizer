@@ -17,6 +17,7 @@ Live Gmail / Pub/Sub / agent calls sit behind seams (``NullSource``,
 
 from __future__ import annotations
 
+import contextlib
 import glob
 import json
 import logging
@@ -40,6 +41,14 @@ from .modules import ModuleRegistry
 from .notifier import DeliveryNotifier
 from .oauth import PendingStore, load_oauth_client
 from .onboarding_tools import make_disconnect_tool, make_onboarding_tools
+from .tools_profile import (
+    INBOX_BACKFILL_PROFILES_SCHEMA,
+    INBOX_GET_SENDER_PROFILE_SCHEMA,
+    INBOX_SAVE_SENDER_PROFILE_SCHEMA,
+    make_backfill_profiles_handler,
+    make_get_sender_profile_handler,
+    make_save_sender_profile_handler,
+)
 from .tools_read import (
     INBOX_LIST_EMAILS_SCHEMA,
     READ_TOOLS,
@@ -55,7 +64,12 @@ _RUNTIME: Any = None
 # reconnect nudge in pre_llm_call; cleared when the account is (re)connected.
 _NEEDS_RECONNECT: set[str] = set()
 # Owner-gated tools (connecting/disconnecting mailboxes).
-CONNECT_TOOLS = {"inbox_connect_account", "inbox_complete_connection", "inbox_disconnect_account"}
+CONNECT_TOOLS = {
+    "inbox_connect_account",
+    "inbox_complete_connection",
+    "inbox_disconnect_account",
+    "inbox_backfill_profiles",  # owner-only: expensive LLM backfill, never from a draft turn
+}
 
 
 class _GatewayCapture:
@@ -135,7 +149,11 @@ def register(ctx: Any) -> InboxDaemon:
         name="inbox_create_draft",
         toolset="inbox",
         schema=INBOX_CREATE_DRAFT_SCHEMA,
-        handler=make_inbox_create_draft_handler(_resolve_writer(ctx)),
+        handler=make_inbox_create_draft_handler(
+            _resolve_writer(ctx),
+            record_draft=_record_draft_id,
+            lookup_draft=_lookup_draft_id,
+        ),
         description="Create a Gmail draft reply (never sends).",
         emoji="\U0001f4dd",
     )
@@ -171,6 +189,22 @@ def register(ctx: Any) -> InboxDaemon:
         handler=_inbox_list_accounts_handler,
         description=INBOX_LIST_ACCOUNTS_SCHEMA["description"],
     )
+
+    # 1c-bis. Sender-profile tools: the agent reads + refines per-correspondent voice
+    # (available on draft turns); inbox_backfill_profiles seeds profiles from sent mail
+    # (owner-gated via CONNECT_TOOLS — expensive, never from a draft turn).
+    for _schema, _handler in (
+        (INBOX_GET_SENDER_PROFILE_SCHEMA, make_get_sender_profile_handler()),
+        (INBOX_SAVE_SENDER_PROFILE_SCHEMA, make_save_sender_profile_handler()),
+        (INBOX_BACKFILL_PROFILES_SCHEMA, make_backfill_profiles_handler(_run_backfill)),
+    ):
+        ctx.register_tool(
+            name=_schema["name"],
+            toolset="inbox",
+            schema=_schema,
+            handler=_handler,
+            description=_schema["description"],
+        )
 
     # 1d. The on-demand unread rollup is now a Module (see modules/rollup.py); it
     # contributes the inbox_unread_rollup tool through the registry below.
@@ -305,6 +339,10 @@ def register(ctx: Any) -> InboxDaemon:
         _maybe_start_runtime(registry)
     except Exception:
         logger.exception("inbox: autonomous runtime start failed (on-demand tools still work)")
+    try:
+        _maybe_backfill_on_start()
+    except Exception:
+        logger.exception("inbox: backfill auto-start failed (on-demand tool still works)")
     logger.info("hermes-inbox-organizer registered")
     return daemon
 
@@ -599,6 +637,68 @@ def _hot_add_account(token: Any) -> bool:
     return bool(_RUNTIME.add_account(_build_account(token.email)))
 
 
+def _run_account_backfill(account_id: str, force: bool = False) -> dict:
+    """Backfill one account's sender profiles (reader + local LLM + DB). Returns a summary."""
+    from . import backfill, db, llm
+    from .config import get_config
+    from .gmail import reader_from_token
+
+    tok = _load_token_for(account_id)
+    if tok is None:
+        return {"error": f"account not connected: {account_id}"}
+    cfg = get_config()
+    with contextlib.closing(db.connect(cfg.db_path)) as conn:
+        return backfill.backfill_sender_profiles(
+            reader=reader_from_token(tok),
+            summarize_fn=llm.summarize,
+            conn=conn,
+            account=account_id,
+            max_senders=cfg.backfill_max_senders,
+            sample_per_sender=cfg.backfill_sample_per_sender,
+            force=force,
+        )
+
+
+def _run_backfill(account_id: Optional[str], force: bool) -> dict:
+    """Tool entry: backfill one account (``account_id``) or ALL connected accounts."""
+    targets = [account_id] if account_id else sorted(_load_all_tokens())
+    return {email: _run_account_backfill(email, force) for email in targets}
+
+
+def _safe_backfill(email: str) -> None:
+    try:
+        _run_account_backfill(email, force=False)
+    except Exception:
+        logger.exception("inbox: backfill run failed for %s", email)
+
+
+def _maybe_backfill_on_start() -> None:
+    """Auto-run the backfill ONCE per account, off the hot path on a daemon thread.
+
+    Guarded by an atomic ``note_once`` claim (NOT an empty-table check, so concurrent
+    threads / restarts can't double-spend). Gated on INBOX_BACKFILL_ON_START + an
+    OpenRouter key (the summarizer needs it).
+    """
+    from . import db
+    from .config import get_config
+
+    cfg = get_config()
+    if not cfg.backfill_on_start or not os.environ.get("OPENROUTER_API_KEY"):
+        return
+    for email in sorted(_load_all_tokens()):
+        try:
+            with contextlib.closing(db.connect(cfg.db_path)) as conn:
+                if not db.note_once(conn, "backfill", email, "auto-start"):
+                    continue  # already auto-backfilled (this process or a prior run)
+        except Exception:
+            logger.exception("inbox: backfill auto-start guard failed for %s", email)
+            continue
+        threading.Thread(
+            target=_safe_backfill, args=(email,), name=f"inbox-backfill-{_safe_email(email)}", daemon=True
+        ).start()
+        logger.info("inbox: auto-backfilling sender profiles for %s", email)
+
+
 INBOX_LIST_ACCOUNTS_SCHEMA: dict[str, Any] = {
     "name": "inbox_list_accounts",
     "description": (
@@ -618,6 +718,38 @@ def _inbox_list_accounts_handler(args: dict, **_kwargs: Any) -> str:
     if _NEEDS_RECONNECT:
         out["needs_reconnect"] = sorted(_NEEDS_RECONNECT)
     return json.dumps(out)
+
+
+def _record_draft_id(account_id: str, thread_id: str, draft_id: str) -> None:
+    """Persist a created/updated Gmail draft id to the ledger — closes the draft loop.
+
+    Runs inside the Hermes api_server turn (same process + ``state.db`` as the
+    daemon), opening its own short-lived connection. A failure is surfaced to the
+    caller (``inbox_create_draft`` wraps + logs it) and never blocks the draft.
+    """
+    from . import db
+    from .config import get_config
+
+    with contextlib.closing(db.connect(get_config().db_path)) as conn:
+        db.set_draft_id(conn, account_id, thread_id, draft_id)
+
+
+def _lookup_draft_id(account_id: str, thread_id: str) -> Optional[str]:
+    """Existing Gmail draft id for a thread so a re-draft UPDATES instead of duplicating.
+
+    Defensive: any failure resolves to None (treat as no existing draft → create),
+    so a ledger hiccup never blocks drafting.
+    """
+    try:
+        from . import db
+        from .config import get_config
+
+        with contextlib.closing(db.connect(get_config().db_path)) as conn:
+            row = db.get_draft_request(conn, account_id, thread_id)
+            return row["gmail_draft_id"] if row else None
+    except Exception:
+        logger.exception("inbox: draft lookup failed for thread %s", thread_id)
+        return None
 
 
 def _resolve_writer(ctx: Any):

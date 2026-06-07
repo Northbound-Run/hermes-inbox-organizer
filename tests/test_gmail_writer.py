@@ -54,6 +54,11 @@ class _Drafts:
         self._rec["create_body"] = body
         return _Exec({"id": "draft-xyz"})
 
+    def update(self, userId, id, body):
+        self._rec["update_id"] = id
+        self._rec["update_body"] = body
+        return _Exec({"id": id})
+
 
 class _Threads:
     def __init__(self, thread):
@@ -104,3 +109,27 @@ def test_create_draft_builds_mime_and_posts_to_thread() -> None:
     assert parsed["Subject"] == "Re: Project update"
     assert parsed["In-Reply-To"] == "<msg-1@y>"
     assert "Thanks Alice" in parsed.get_payload(decode=True).decode("utf-8")
+
+
+def test_update_draft_uses_drafts_update_not_create() -> None:
+    # AC6: updating an existing draft hits drafts.update (no second draft created).
+    rec: dict = {}
+    thread = _thread([_m("alice@y.com", "Project update", "<msg-1@y>")])
+    writer = GmailDraftWriter(_Service(thread, rec), "me@gmail.com")
+
+    out = writer.update_draft(
+        account_id="acct", thread_id="thread-42", body="Revised reply.", draft_id="draft-9"
+    )
+
+    assert out == "draft-9"
+    assert "create_body" not in rec        # did NOT create a duplicate
+    assert rec["update_id"] == "draft-9"
+    msg = rec["update_body"]["message"]
+    assert msg["threadId"] == "thread-42"
+
+    import email as emaillib
+
+    parsed = emaillib.message_from_bytes(base64.urlsafe_b64decode(msg["raw"]))
+    assert parsed["To"] == "alice@y.com"
+    assert parsed["Subject"] == "Re: Project update"
+    assert "Revised reply." in parsed.get_payload(decode=True).decode("utf-8")

@@ -32,3 +32,26 @@ def classify_json(system: str, user: str, *, model: "str | None" = None) -> dict
         temperature=0,
     )
     return json.loads(resp.choices[0].message.content or "{}")
+
+
+def summarize(system: str, user: str, *, model: "str | None" = None) -> str:
+    """Plain-text completion (mirrors :func:`classify_json` but returns the raw string).
+
+    Used by the sender-profile backfill to distil the owner's voice from their own
+    sent prose. Temperature 0 for stable, terse output.
+    """
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key=os.environ["OPENROUTER_API_KEY"],
+        base_url="https://openrouter.ai/api/v1",
+    )
+    resp = client.chat.completions.create(
+        model=model or DEFAULT_MODEL,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        temperature=0,
+    )
+    return (resp.choices[0].message.content or "").strip()

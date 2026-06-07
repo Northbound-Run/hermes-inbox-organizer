@@ -250,6 +250,7 @@ def wake_draft(
     thread_id: str,
     sender: str = "",
     subject: str = "",
+    instruction: "str | None" = None,
     poster: "MessagePoster | None" = None,
 ) -> bool:
     """Autonomous draft trigger: POST a drafting task to the local Hermes api_server.
@@ -257,10 +258,15 @@ def wake_draft(
     The PROVEN path — every live draft test drove the agent this way, and it's
     silent (no Matrix-chat pollution). Reads HERMES_API_URL / API_SERVER_KEY /
     HERMES_MODEL from env; ``poster`` is injectable for tests.
+
+    ``instruction`` is the prebuilt wake message (the runtime passes the context-rich
+    brief from ``brief.build_draft_brief``). When None, falls back to the minimal
+    ``build_draft_instruction`` so direct/unenriched callers still work.
     """
-    instruction = build_draft_instruction(
-        account_id=account_id, thread_id=thread_id, sender=sender, subject=subject
-    )
+    if instruction is None:
+        instruction = build_draft_instruction(
+            account_id=account_id, thread_id=thread_id, sender=sender, subject=subject
+        )
     if poster is not None:
         # injected (tests): run synchronously for determinism
         try:

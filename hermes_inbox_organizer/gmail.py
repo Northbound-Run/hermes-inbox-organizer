@@ -29,6 +29,17 @@ def _header(headers: list[dict], name: str) -> str:
     return ""
 
 
+def parse_addr(value: str) -> str:
+    """Bare, lowercased email from a header value ('Alice <a@b.com>' -> 'a@b.com').
+
+    The normalized key for sender_profiles + history matching. Empty string if the
+    value has no parseable address.
+    """
+    from email.utils import parseaddr
+
+    return parseaddr(value or "")[1].strip().lower()
+
+
 def _extract_plain(payload: dict) -> str:
     if payload.get("mimeType") == "text/plain":
         data = (payload.get("body") or {}).get("data")
@@ -217,7 +228,8 @@ class GmailDraftWriter:
         self._svc = service
         self._email = account_email
 
-    def create_draft(self, *, account_id: str, thread_id: str, body: str) -> str:
+    def _build_reply_raw(self, thread_id: str, body: str) -> str:
+        """Build the base64url MIME reply for a thread (shared by create + update)."""
         import base64
         from email.mime.text import MIMEText
 
@@ -240,7 +252,10 @@ class GmailDraftWriter:
         if h["in_reply_to"]:
             mime["In-Reply-To"] = h["in_reply_to"]
             mime["References"] = h["references"]
-        raw = base64.urlsafe_b64encode(mime.as_bytes()).decode()
+        return base64.urlsafe_b64encode(mime.as_bytes()).decode()
+
+    def create_draft(self, *, account_id: str, thread_id: str, body: str) -> str:
+        raw = self._build_reply_raw(thread_id, body)
         resp = (
             self._svc.users()
             .drafts()
@@ -248,6 +263,22 @@ class GmailDraftWriter:
             .execute()
         )
         return resp.get("id", "")
+
+    def update_draft(self, *, account_id: str, thread_id: str, body: str, draft_id: str) -> str:
+        """Replace an existing draft's body (``drafts.update``).
+
+        Called when the ledger already holds a draft id for the thread, so a
+        re-draft (retry / re-wake) overwrites the one draft instead of creating a
+        duplicate on the thread.
+        """
+        raw = self._build_reply_raw(thread_id, body)
+        resp = (
+            self._svc.users()
+            .drafts()
+            .update(userId="me", id=draft_id, body={"message": {"raw": raw, "threadId": thread_id}})
+            .execute()
+        )
+        return resp.get("id", draft_id)
 
 
 def writer_from_token(tok: Any) -> "GmailDraftWriter":

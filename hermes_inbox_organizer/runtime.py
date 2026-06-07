@@ -35,6 +35,15 @@ RENEWAL_CHECK_INTERVAL_S = 6 * 60 * 60  # check every 6h
 # catch anything the push path missed. Cursor-based, so it never reprocesses.
 POLL_INTERVAL_S = 5 * 60
 
+# Draft dispatch dedup + retry. A dispatched draft is "in flight" for RETRY_TTL_MS;
+# an unfulfilled draft past that window is retried, up to MAX_DRAFT_ATTEMPTS. All
+# three dispatch paths (notify, poll reconciler, retry loop) funnel through the
+# atomic db.claim_draft, so exactly one wins per window. RETRY_TTL_MS MUST be
+# >= POLL_INTERVAL_S so the reconciler never re-dispatches a still-running turn.
+RETRY_TTL_MS = 15 * 60 * 1000        # 15 min (>= POLL_INTERVAL_S; >> wake-turn p99)
+MAX_DRAFT_ATTEMPTS = 3
+DRAFT_RETRY_INTERVAL_S = 5 * 60      # re-scan unfulfilled drafts every 5 min
+
 
 def arm_watch(service: Any, topic: str) -> tuple[str, int]:
     """Arm Gmail watch on INBOX+SENT → topic; return (start historyId, expiration_ms)."""
@@ -127,20 +136,65 @@ class InboxRuntime:
         return db.connect(self._db_path)
 
     def _dedup_wake(self, **kw: Any) -> None:
-        """Wake a draft once per (account, thread) — reprocessing/redrain can't double-draft."""
+        """Atomically claim + dispatch a draft once per (account, thread).
+
+        The single ``db.claim_draft`` gate is shared by all three dispatch paths
+        (this notify path, the poll reconciler — also routed through here — and the
+        retry loop), so a fulfilled, in-flight, or exhausted thread is skipped
+        without a second agent turn, with no reliance on the RLock for correctness.
+        The claim records the attempt BEFORE dispatch, so a turn that dies mid-flight
+        is retried by ``_draft_retry_loop`` after the TTL.
+        """
         if self._wake_fn is None:
             return
         tid = kw.get("thread_id", "")
         acct = kw.get("account_id", "")
-        if tid and acct:
-            with contextlib.closing(self._db()) as conn:
-                if db.draft_already_requested(conn, acct, tid):
-                    logger.info("inbox runtime: already drafted thread %s, skipping", tid)
-                    return
-        self._wake_fn(**kw)
-        if tid and acct:
-            with contextlib.closing(self._db()) as conn:
-                db.mark_draft_requested(conn, acct, tid)
+        if not (tid and acct):
+            # No thread/account => nothing to draft against; skip rather than
+            # dispatch an un-deduped, un-retryable wake (drafting needs a thread id).
+            logger.warning(
+                "inbox runtime: draft wake missing account/thread (%r/%r); skipping", acct, tid
+            )
+            return
+        with contextlib.closing(self._db()) as conn:
+            won = db.claim_draft(
+                conn, acct, tid,
+                from_addr=kw.get("sender", ""), subject=kw.get("subject", ""),
+                ttl_ms=RETRY_TTL_MS, max_attempts=MAX_DRAFT_ATTEMPTS, now_ms=db.now_ms(),
+            )
+            if not won:
+                self._log_draft_skip(conn, acct, tid)
+                return
+            instruction = self._build_brief(conn, acct, tid, kw.get("sender", ""), kw.get("subject", ""))
+        # Claim won. wake_fn (wake_draft) is fire-and-forget; a failure inside it is
+        # recovered by _draft_retry_loop after the TTL (the claim already recorded the
+        # attempt), so the return value is intentionally not consulted here.
+        self._wake_fn(instruction=instruction, **kw)
+
+    def _build_brief(self, conn: sqlite3.Connection, acct: str, tid: str, sender: str, subject: str):
+        """Context-rich wake instruction; falls back to the minimal one (None) on failure."""
+        try:
+            from .brief import build_draft_brief
+
+            return build_draft_brief(conn, account_id=acct, thread_id=tid, sender=sender, subject=subject)
+        except Exception:
+            logger.exception("inbox runtime: brief build failed for thread %s; using minimal wake", tid)
+            return None
+
+    def _log_draft_skip(self, conn: sqlite3.Connection, acct: str, tid: str) -> None:
+        """Explain a lost claim (fulfilled / in-flight / exhausted); exhausted at WARNING."""
+        row = db.get_draft_request(conn, acct, tid)
+        if row is None:
+            return
+        if row["gmail_draft_id"]:
+            logger.info("inbox runtime: thread %s already drafted (%s); skipping", tid, row["gmail_draft_id"])
+        elif row["attempts"] >= MAX_DRAFT_ATTEMPTS:
+            logger.warning(
+                "inbox runtime: thread %s exhausted draft retries (%d attempts, no draft)",
+                tid, row["attempts"],
+            )
+        else:
+            logger.info("inbox runtime: thread %s draft in flight; skipping", tid)
 
     def start(self) -> None:
         from .labels_apply import ensure_labels
@@ -175,6 +229,7 @@ class InboxRuntime:
         self._future = sub.subscribe(sub_path, callback=self._on_message, flow_control=flow)
         threading.Thread(target=self._renewal_loop, name="inbox-watch-renewal", daemon=True).start()
         threading.Thread(target=self._poll_loop, name="inbox-poll-reconciler", daemon=True).start()
+        threading.Thread(target=self._draft_retry_loop, name="inbox-draft-retry", daemon=True).start()
         self._start_periodic_jobs()
         logger.info("inbox runtime: watching %d account(s), pulling %s", len(self._by_email), sub_path)
 
@@ -271,6 +326,52 @@ class InboxRuntime:
                     self._drain_account(account, fallback_history_id=cursor)
                 except Exception:
                     logger.exception("inbox runtime: poll drain failed for %s", account.email)
+
+    def _draft_retry_loop(self) -> None:
+        """Re-dispatch unfulfilled drafts whose agent turns failed or were dropped.
+
+        Required because the history cursor advances after each drain, so a failed
+        To-Respond draft is never re-emitted by a redrain — only this loop retries
+        it (until fulfilled or MAX_DRAFT_ATTEMPTS).
+        """
+        while True:
+            time.sleep(DRAFT_RETRY_INTERVAL_S)
+            try:
+                self._retry_unfulfilled_drafts()
+            except Exception:
+                logger.exception("inbox runtime: draft retry pass failed")
+
+    def _retry_unfulfilled_drafts(self) -> None:
+        """One retry pass: re-claim + re-dispatch each eligible unfulfilled draft.
+
+        Re-dispatch uses the keyword-only ``wake_fn`` contract with the stored
+        ``from_addr`` mapped to the ``sender`` kwarg (``wake_draft`` takes no
+        positional args). The atomic ``claim_draft`` re-check means a draft the
+        notify/poll path just handled is skipped here.
+        """
+        if self._wake_fn is None:
+            return
+        with contextlib.closing(self._db()) as conn:
+            rows = db.unfulfilled_drafts(
+                conn, ttl_ms=RETRY_TTL_MS, max_attempts=MAX_DRAFT_ATTEMPTS, now_ms=db.now_ms()
+            )
+        for row in rows:
+            acct, tid = row["account"], row["thread_id"]
+            sender, subject = row["from_addr"] or "", row["subject"] or ""
+            instruction = None
+            with self._lock:
+                with contextlib.closing(self._db()) as conn:
+                    won = db.claim_draft(
+                        conn, acct, tid, from_addr=sender, subject=subject,
+                        ttl_ms=RETRY_TTL_MS, max_attempts=MAX_DRAFT_ATTEMPTS, now_ms=db.now_ms(),
+                    )
+                    if not won:
+                        continue  # another dispatch path just handled it
+                    instruction = self._build_brief(conn, acct, tid, sender, subject)
+            self._wake_fn(
+                account_id=acct, thread_id=tid, sender=sender, subject=subject, instruction=instruction
+            )
+            logger.info("inbox runtime: retried draft dispatch for thread %s", tid)
 
     def _start_periodic_jobs(self) -> None:
         """Start each module-contributed timer job on its own daemon thread.

@@ -394,3 +394,56 @@ def test_poll_once_auth_failure_does_not_deadlock(tmp_path) -> None:
     assert flagged == ["a@gmail.com"]              # flagged for reconnect
     assert "a@gmail.com" not in rt._by_email        # dropped from routing
     assert _read_cursor(dbp, "a@gmail.com") == "150"  # cursor not advanced
+
+
+def test_dedup_wake_skips_after_draft_recorded(tmp_path) -> None:
+    # AC2: once a draft exists (gmail_draft_id set), the thread is never re-dispatched.
+    woke: list[str] = []
+    dbp = _dbp(tmp_path)
+    rt = InboxRuntime(
+        accounts=[], project="p", topic="t", subscription="s", sa_key_path="x",
+        db_path=dbp, wake_fn=lambda **kw: woke.append(kw["thread_id"]),
+    )
+    rt._dedup_wake(thread_id="t1", account_id="a", sender="s@x", subject="Q")  # claim + wake
+    with contextlib.closing(db.connect(dbp)) as conn:
+        db.set_draft_id(conn, "a", "t1", "draft-1")  # fulfilled
+    rt._dedup_wake(thread_id="t1", account_id="a", sender="s@x", subject="Q")  # fulfilled -> skip
+    assert woke == ["t1"]
+
+
+def test_retry_redispatches_unfulfilled_after_ttl(tmp_path) -> None:
+    # AC4: an unfulfilled draft past the TTL is re-dispatched via the KEYWORD-ONLY
+    # wake_fn contract (DB column from_addr -> kwarg sender) — proves the B1 fix.
+    import hermes_inbox_organizer.runtime as rt_mod
+
+    woke: list[dict] = []
+    dbp = _dbp(tmp_path)
+    rt = InboxRuntime(
+        accounts=[], project="p", topic="t", subscription="s", sa_key_path="x",
+        db_path=dbp, wake_fn=lambda **kw: woke.append(kw),
+    )
+    with contextlib.closing(db.connect(dbp)) as conn:
+        db.claim_draft(conn, "a@x.com", "t1", from_addr="al@x.com", subject="Q",
+                       ttl_ms=rt_mod.RETRY_TTL_MS, max_attempts=rt_mod.MAX_DRAFT_ATTEMPTS, now_ms=1)
+    rt._retry_unfulfilled_drafts()  # real now >> 1 + TTL -> eligible
+    assert len(woke) == 1
+    w = woke[0]
+    assert (w["account_id"], w["thread_id"], w["sender"], w["subject"]) == ("a@x.com", "t1", "al@x.com", "Q")
+    assert isinstance(w["instruction"], str) and "t1" in w["instruction"]  # brief built + passed (Phase 2)
+
+
+def test_retry_skips_exhausted_and_fulfilled(tmp_path) -> None:
+    # AC5: exhausted (max attempts) and fulfilled drafts are never retried.
+    woke: list[dict] = []
+    dbp = _dbp(tmp_path)
+    rt = InboxRuntime(
+        accounts=[], project="p", topic="t", subscription="s", sa_key_path="x",
+        db_path=dbp, wake_fn=lambda **kw: woke.append(kw),
+    )
+    with contextlib.closing(db.connect(dbp)) as conn:
+        for now in (1, 1000, 2000):  # exhaust attempts (3), all in the past
+            db.claim_draft(conn, "a@x.com", "t1", ttl_ms=1, max_attempts=3, now_ms=now)
+        db.claim_draft(conn, "a@x.com", "t2", ttl_ms=1, max_attempts=3, now_ms=1)
+        db.set_draft_id(conn, "a@x.com", "t2", "d-2")  # fulfilled
+    rt._retry_unfulfilled_drafts()
+    assert woke == []

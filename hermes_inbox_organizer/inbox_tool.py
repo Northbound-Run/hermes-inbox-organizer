@@ -85,10 +85,26 @@ INBOX_CREATE_DRAFT_SCHEMA: dict[str, Any] = {
 # Seam: account_id -> writer (live GmailDraftWriter, or a LoggingDraftWriter
 # fallback when no account is connected). None => not connected.
 ResolveWriter = Callable[[str], Optional[GmailDraftWriter]]
+# Seams that close the draft ledger loop (both optional; default no-op so existing
+# call sites are unaffected and tests inject fakes).
+RecordDraft = Callable[[str, str, str], Any]       # (account_id, thread_id, draft_id) -> persist
+LookupDraft = Callable[[str, str], Optional[str]]  # (account_id, thread_id) -> existing draft id | None
 
 
-def make_inbox_create_draft_handler(resolve_writer: ResolveWriter):
-    """Build the tool handler closure over an account->writer resolver."""
+def make_inbox_create_draft_handler(
+    resolve_writer: ResolveWriter,
+    *,
+    record_draft: Optional[RecordDraft] = None,
+    lookup_draft: Optional[LookupDraft] = None,
+):
+    """Build the tool handler closure over an account->writer resolver.
+
+    ``record_draft`` persists the created/updated Gmail draft id so the daemon's
+    ledger is closed (``draft_requests.gmail_draft_id``); a recorder failure is
+    logged, never raised (tool contract). ``lookup_draft`` returns an existing
+    draft id for the thread so a re-draft UPDATES it rather than creating a
+    duplicate. Both default to None (no-op) — production wires them to the DB.
+    """
 
     def handler(args: dict, **_kwargs: Any) -> str:
         a = args or {}
@@ -103,11 +119,25 @@ def make_inbox_create_draft_handler(resolve_writer: ResolveWriter):
         if writer is None:
             return json.dumps({"error": f"account not connected: {account_id!r}"})
         try:
-            draft_id = writer.create_draft(
-                account_id=account_id, thread_id=thread_id, body=body
-            )
+            existing = lookup_draft(account_id, thread_id) if lookup_draft else None
+            update = getattr(writer, "update_draft", None)
+            if existing and update is not None:
+                draft_id = update(
+                    account_id=account_id, thread_id=thread_id, body=body, draft_id=existing
+                )
+            else:
+                draft_id = writer.create_draft(
+                    account_id=account_id, thread_id=thread_id, body=body
+                )
         except Exception as exc:  # contract: never raise out of a tool handler
             return json.dumps({"error": f"draft creation failed: {exc}"})
+        if record_draft is not None:
+            try:
+                record_draft(account_id, thread_id, draft_id)
+            except Exception:  # recording must never break the tool
+                logger.exception(
+                    "inbox_create_draft: failed to record draft id for thread %s", thread_id
+                )
         return json.dumps({"ok": True, "draft_id": draft_id, "thread_id": thread_id})
 
     return handler

@@ -26,7 +26,7 @@ from typing import Optional
 
 from .config import get_config
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS accounts (
@@ -45,7 +45,11 @@ CREATE TABLE IF NOT EXISTS accounts (
 CREATE TABLE IF NOT EXISTS draft_requests (
     account         TEXT NOT NULL,
     thread_id       TEXT NOT NULL,
-    gmail_draft_id  TEXT,                                  -- set once the draft is created (idempotency)
+    gmail_draft_id  TEXT,                                  -- set once the draft is created (fulfilment = idempotency)
+    from_addr       TEXT,                                  -- stored on claim so the retry loop can rebuild the wake
+    subject         TEXT,
+    attempts        INTEGER NOT NULL DEFAULT 0,            -- dispatch attempts; capped by MAX_DRAFT_ATTEMPTS
+    last_attempt_ms INTEGER,                               -- last dispatch time; in-flight window = within RETRY_TTL_MS
     created_at_ms   INTEGER NOT NULL,
     PRIMARY KEY (account, thread_id)
 );
@@ -108,6 +112,24 @@ CREATE TABLE IF NOT EXISTS tracked_packages (
     PRIMARY KEY (account, tracking_number)
 );
 CREATE INDEX IF NOT EXISTS idx_pkg_active ON tracked_packages (registered, terminal);
+
+-- Per-correspondent voice/relationship profile feeding the drafting brief. Keyed
+-- by the normalized sender email (bare, lowercased). Seeded by the sent-mail
+-- backfill (source='backfill') and refined by the agent (source='agent'). A new
+-- table, so it is created via SCHEMA_SQL on the next connect (no version bump).
+CREATE TABLE IF NOT EXISTS sender_profiles (
+    account             TEXT NOT NULL,
+    sender_email        TEXT NOT NULL,            -- normalized: bare lowercased address
+    display_name        TEXT,
+    relationship        TEXT,
+    voice_notes         TEXT,                     -- how the owner writes to this person
+    tone_hints          TEXT,
+    draft_count         INTEGER NOT NULL DEFAULT 0,
+    last_drafted_at_ms  INTEGER,
+    source              TEXT,                      -- 'backfill' | 'agent' | 'manual'
+    updated_at_ms       INTEGER NOT NULL,
+    PRIMARY KEY (account, sender_email)
+);
 """
 
 _INITIALIZED_PATHS: set[str] = set()
@@ -135,9 +157,20 @@ def _migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version >= _SCHEMA_VERSION:
         return
-    # v1 is the base schema in SCHEMA_SQL (already applied by the caller). Future
-    # additive migrations go here, gated on `version`, then bump _SCHEMA_VERSION:
-    #   if version < 2: conn.execute("ALTER TABLE accounts ADD COLUMN ...")
+    if version < 2:
+        # v2: draft_requests grows retry/idempotency columns. Additive ALTERs so an
+        # existing v1 state.db upgrades in place; a fresh DB already has them from
+        # SCHEMA_SQL, so add only what's missing. Forward-only + rollback-safe (a v1
+        # image sees user_version>=1 and no-ops; the extra columns go unused).
+        existing = {r[1] for r in conn.execute("PRAGMA table_info(draft_requests)")}
+        for col, decl in (
+            ("from_addr", "TEXT"),
+            ("subject", "TEXT"),
+            ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_attempt_ms", "INTEGER"),
+        ):
+            if col not in existing:
+                conn.execute(f"ALTER TABLE draft_requests ADD COLUMN {col} {decl}")
     conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 
 
@@ -210,6 +243,87 @@ def set_draft_id(conn: sqlite3.Connection, account: str, thread_id: str, gmail_d
     )
 
 
+def get_draft_request(conn: sqlite3.Connection, account: str, thread_id: str) -> Optional[sqlite3.Row]:
+    """The draft_requests row for a thread, or None."""
+    return conn.execute(
+        "SELECT * FROM draft_requests WHERE account = ? AND thread_id = ?",
+        (account, thread_id),
+    ).fetchone()
+
+
+def claim_draft(
+    conn: sqlite3.Connection,
+    account: str,
+    thread_id: str,
+    *,
+    ttl_ms: int,
+    max_attempts: int,
+    now_ms: int,
+    from_addr: str = "",
+    subject: str = "",
+) -> bool:
+    """Atomically claim the right to dispatch a draft for ``(account, thread_id)``.
+
+    Returns True to exactly ONE caller per eligible window. A single conditional
+    UPSERT (mirrors :func:`note_once`) so every dispatch path — the notify
+    ``_dedup_wake``, the poll reconciler (also routed through ``_dedup_wake``), and
+    the retry loop — races safely without relying on an external lock:
+
+    * brand-new thread                                   -> INSERT (attempt 1) -> True
+    * unfulfilled, last attempt older than ``ttl_ms``,
+      still under ``max_attempts``                       -> UPDATE (attempt +1) -> True
+    * fulfilled (``gmail_draft_id`` set), in-flight
+      (within ``ttl_ms``), or exhausted (>= max)         -> no change          -> False
+
+    ``from_addr``/``subject`` are captured on the first claim and refreshed only
+    when a non-empty value is supplied, so the retry loop can rebuild the wake.
+    """
+    cur = conn.execute(
+        """
+        INSERT INTO draft_requests
+               (account, thread_id, from_addr, subject, attempts, last_attempt_ms, created_at_ms)
+             VALUES (:acct, :tid, :from_addr, :subject, 1, :now, :now)
+        ON CONFLICT(account, thread_id) DO UPDATE SET
+               attempts        = attempts + 1,
+               last_attempt_ms = :now,
+               from_addr       = COALESCE(NULLIF(excluded.from_addr, ''), draft_requests.from_addr),
+               subject         = COALESCE(NULLIF(excluded.subject, ''), draft_requests.subject)
+             WHERE draft_requests.gmail_draft_id IS NULL
+               AND draft_requests.attempts < :max
+               AND (draft_requests.last_attempt_ms IS NULL
+                    OR draft_requests.last_attempt_ms <= :now - :ttl)
+        """,
+        {
+            "acct": account, "tid": thread_id, "from_addr": from_addr, "subject": subject,
+            "now": now_ms, "max": max_attempts, "ttl": ttl_ms,
+        },
+    )
+    return cur.rowcount == 1
+
+
+def unfulfilled_drafts(
+    conn: sqlite3.Connection, *, ttl_ms: int, max_attempts: int, now_ms: int
+) -> list[sqlite3.Row]:
+    """Rows eligible for a retry: no draft yet, under max attempts, past the ttl window."""
+    return conn.execute(
+        """SELECT * FROM draft_requests
+            WHERE gmail_draft_id IS NULL
+              AND attempts < ?
+              AND (last_attempt_ms IS NULL OR last_attempt_ms <= ? - ?)
+            ORDER BY created_at_ms""",
+        (max_attempts, now_ms, ttl_ms),
+    ).fetchall()
+
+
+def exhausted_drafts(conn: sqlite3.Connection, *, max_attempts: int) -> list[sqlite3.Row]:
+    """Stuck drafts: max attempts reached with no draft created (durable, queryable state)."""
+    return conn.execute(
+        "SELECT * FROM draft_requests WHERE gmail_draft_id IS NULL AND attempts >= ? "
+        "ORDER BY created_at_ms",
+        (max_attempts,),
+    ).fetchall()
+
+
 # ── Classified messages ─────────────────────────────────────────────────────────
 
 def record_classified_message(
@@ -275,6 +389,58 @@ def get_thread_state(conn: sqlite3.Connection, account: str, thread_id: str) -> 
         "SELECT * FROM thread_state WHERE account = ? AND thread_id = ?",
         (account, thread_id),
     ).fetchone()
+
+
+# ── Sender profiles (voice/relationship for the drafting brief) ───────────────────
+
+def get_sender_profile(
+    conn: sqlite3.Connection, account: str, sender_email: str
+) -> Optional[sqlite3.Row]:
+    """The profile row for a (normalized) sender, or None."""
+    return conn.execute(
+        "SELECT * FROM sender_profiles WHERE account = ? AND sender_email = ?",
+        (account, sender_email),
+    ).fetchone()
+
+
+def upsert_sender_profile(
+    conn: sqlite3.Connection,
+    *,
+    account: str,
+    sender_email: str,
+    display_name: Optional[str] = None,
+    relationship: Optional[str] = None,
+    voice_notes: Optional[str] = None,
+    tone_hints: Optional[str] = None,
+    source: Optional[str] = None,
+) -> None:
+    """Insert or update a sender profile. ``COALESCE`` keeps existing non-NULL fields
+    when a partial update passes None, so a later refinement never clobbers prior data."""
+    conn.execute(
+        """INSERT INTO sender_profiles
+               (account, sender_email, display_name, relationship, voice_notes, tone_hints,
+                source, draft_count, updated_at_ms)
+               VALUES (:acct, :addr, :dn, :rel, :vn, :th, :src, 0, :now)
+           ON CONFLICT(account, sender_email) DO UPDATE SET
+               display_name  = COALESCE(:dn, display_name),
+               relationship  = COALESCE(:rel, relationship),
+               voice_notes   = COALESCE(:vn, voice_notes),
+               tone_hints    = COALESCE(:th, tone_hints),
+               source        = COALESCE(:src, source),
+               updated_at_ms = :now""",
+        {"acct": account, "addr": sender_email, "dn": display_name, "rel": relationship,
+         "vn": voice_notes, "th": tone_hints, "src": source, "now": now_ms()},
+    )
+
+
+def bump_sender_draft_count(conn: sqlite3.Connection, account: str, sender_email: str) -> None:
+    """Increment draft_count + stamp last_drafted_at_ms (no-op if no profile exists yet)."""
+    conn.execute(
+        """UPDATE sender_profiles
+              SET draft_count = draft_count + 1, last_drafted_at_ms = ?, updated_at_ms = ?
+            WHERE account = ? AND sender_email = ?""",
+        (now_ms(), now_ms(), account, sender_email),
+    )
 
 
 # ── Module dedup (generic once-only marker) ──────────────────────────────────────

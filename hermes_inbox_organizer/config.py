@@ -54,6 +54,10 @@ class Config:
     track17_key_file: str  # config-mount path to the 17track API key
     shipping_poll_interval_s: int  # INBOX_SHIPPING_POLL_INTERVAL_S (default 4h)
     shipping_max_active: int  # INBOX_SHIPPING_MAX_ACTIVE (cap on concurrently-tracked parcels)
+    # Sender-profile backfill (Phase 2): seed voice profiles from sent mail.
+    backfill_on_start: bool  # INBOX_BACKFILL_ON_START (default on)
+    backfill_max_senders: int  # INBOX_BACKFILL_MAX_SENDERS (top-N recipients to profile)
+    backfill_sample_per_sender: int  # INBOX_BACKFILL_SAMPLE_PER_SENDER (sent msgs sampled/sender)
 
     def token_path(self, safe_email: str) -> str:
         """Path to an account's encrypted token file (``accounts/<email>.json``)."""
@@ -116,6 +120,9 @@ def get_config() -> Config:
         track17_key_file=cfg("INBOX_17TRACK_KEY_FILE", "inbox-17track-key"),
         shipping_poll_interval_s=_env_int("INBOX_SHIPPING_POLL_INTERVAL_S", 4 * 3600),
         shipping_max_active=_env_int("INBOX_SHIPPING_MAX_ACTIVE", 50),
+        backfill_on_start=_env_bool("INBOX_BACKFILL_ON_START", True),
+        backfill_max_senders=_env_int("INBOX_BACKFILL_MAX_SENDERS", 50),
+        backfill_sample_per_sender=_env_int("INBOX_BACKFILL_SAMPLE_PER_SENDER", 15),
     )
 
 

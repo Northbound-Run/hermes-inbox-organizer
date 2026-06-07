@@ -213,33 +213,16 @@ class DraftFeedbackModule(Module):
             account = r["account"]
             if account not in managed or account in reconnect:
                 continue  # unmanaged / awaiting reconnect → not credible (M1)
-            drained_ms = self._account_updated_ms(conn, account)
+            drained_ms = db.get_account_updated_ms(conn, account)
             draft_ms = r["draft_created_ms"] or 0
             if drained_ms is None or drained_ms <= draft_ms:
                 continue  # mailbox wasn't drained through the window → leave pending (M1)
-            # Conditional UPDATE (G1): only flips a row still 'pending', so a send that
-            # on_sent recorded between the read above and now is never clobbered.
-            cur = conn.execute(
-                """UPDATE draft_outcomes
-                      SET outcome = 'no_reply', updated_at_ms = ?
-                    WHERE account = ? AND thread_id = ? AND outcome = 'pending'""",
-                (_now_ms(), account, r["thread_id"]),
-            )
-            marked += cur.rowcount
+            # Conditional flip (G1): db.mark_outcome_no_reply only updates a row still
+            # 'pending', so a send on_sent recorded between the read above and now wins.
+            if db.mark_outcome_no_reply(conn, account, r["thread_id"]):
+                marked += 1
         if marked:
             logger.info("draft-feedback: sweep marked %d no_reply", marked)
-
-    def _account_updated_ms(self, conn: Any, account: str) -> Optional[int]:
-        """``accounts.updated_at_ms`` for the M1 liveness check (None if unknown).
-
-        Read through the sanctioned ``db.connect`` connection; there is no typed
-        accessor for this column and it isn't the module's file to add one, so a
-        scoped read here is the intended path (the plan's M1 liveness seam).
-        """
-        r = conn.execute(
-            "SELECT updated_at_ms FROM accounts WHERE account = ?", (account,)
-        ).fetchone()
-        return r["updated_at_ms"] if r is not None else None
 
     def _retry_distillation(self, conn: Any) -> None:
         """Re-process any outcome that's classified but not yet learned (failed on_sent
@@ -309,7 +292,12 @@ class DraftFeedbackModule(Module):
         try:
             account = a.get("account_id") or None
             with contextlib.closing(self._db_connect()) as conn:
-                histogram = self._outcome_histogram(conn, account)
+                histogram = db.outcome_histogram(conn, account)
+                lesson_rows = (
+                    db.top_lessons(conn, account, limit=self._cfg.draft_feedback_max_lessons)
+                    if account
+                    else db.all_active_lessons(conn, limit=self._cfg.draft_feedback_max_lessons)
+                )
                 lessons = [
                     {
                         "lesson_id": r["lesson_id"],
@@ -317,9 +305,9 @@ class DraftFeedbackModule(Module):
                         "rule": r["rule"],
                         "evidence_count": r["evidence_count"],
                     }
-                    for r in self._all_active_lessons(conn, account)
+                    for r in lesson_rows
                 ]
-                learned_senders = self._learned_sender_summary(conn, account)
+                learned_senders = db.learned_note_summaries(conn, account, limit=100)
             return json.dumps(
                 {
                     "outcomes": histogram,
@@ -356,45 +344,6 @@ class DraftFeedbackModule(Module):
             return json.dumps({"ok": True, "account_id": account, "sender_email": sender})
         except Exception as exc:
             return json.dumps({"error": f"inbox_clear_learned_notes failed: {exc}"})
-
-    # -- status read helpers (scoped reads via the sanctioned connection) --------
-    def _outcome_histogram(self, conn: Any, account: Optional[str]) -> dict:
-        sql = "SELECT outcome, count(*) AS n FROM draft_outcomes"
-        params: list = []
-        if account:
-            sql += " WHERE account = ?"
-            params.append(account)
-        sql += " GROUP BY outcome"
-        return {r["outcome"]: r["n"] for r in conn.execute(sql, params).fetchall()}
-
-    def _all_active_lessons(self, conn: Any, account: Optional[str]) -> list:
-        if account:
-            return db.top_lessons(conn, account, limit=self._cfg.draft_feedback_max_lessons)
-        return conn.execute(
-            """SELECT * FROM draft_lessons WHERE active = 1
-                ORDER BY evidence_count DESC, last_seen_ms DESC LIMIT ?""",
-            (self._cfg.draft_feedback_max_lessons,),
-        ).fetchall()
-
-    def _learned_sender_summary(self, conn: Any, account: Optional[str]) -> list:
-        sql = (
-            "SELECT account, sender_email, length(learned_notes) AS note_len, learned_updated_ms "
-            "FROM sender_profiles WHERE learned_notes IS NOT NULL AND learned_notes != ''"
-        )
-        params: list = []
-        if account:
-            sql += " AND account = ?"
-            params.append(account)
-        sql += " ORDER BY learned_updated_ms DESC LIMIT 100"
-        return [
-            {
-                "account": r["account"],
-                "sender_email": r["sender_email"],
-                "note_chars": r["note_len"],
-                "updated_ms": r["learned_updated_ms"],
-            }
-            for r in conn.execute(sql, params).fetchall()
-        ]
 
 
 INBOX_DRAFT_FEEDBACK_STATUS_SCHEMA: dict = {

@@ -111,6 +111,15 @@ class TrackedPackageRow(TypedDict):
     updated_at_ms: int
 
 
+class LearnedNoteSummaryRow(TypedDict):
+    # A privacy-preserving projection of sender_profiles for the status tool: the
+    # LENGTH of the learned note, never its text (avoids echoing fenced content).
+    account: str
+    sender_email: str
+    note_chars: Optional[int]
+    updated_ms: Optional[int]
+
+
 def _as_dict(row: Optional[sqlite3.Row]) -> Optional[dict[str, Any]]:
     """sqlite3.Row -> plain dict (or None), the single-row accessor boundary."""
     return dict(row) if row is not None else None
@@ -373,6 +382,19 @@ def set_cursor(conn: sqlite3.Connection, account: str, history_id: str) -> None:
                                               updated_at_ms  = excluded.updated_at_ms""",
         (account, history_id, now_ms()),
     )
+
+
+def get_account_updated_ms(conn: sqlite3.Connection, account: str) -> Optional[int]:
+    """``accounts.updated_at_ms`` for an account (None if unknown).
+
+    Bumped by :func:`set_cursor` after every successful drain, so it doubles as a
+    "the mailbox was watched through here" signal — the draft-feedback no_reply sweep
+    reads it for its M1 liveness check (don't false-mark during a token outage).
+    """
+    row = conn.execute(
+        "SELECT updated_at_ms FROM accounts WHERE account = ?", (account,)
+    ).fetchone()
+    return row["updated_at_ms"] if row is not None else None
 
 
 # ── Draft requests (replaces the drafted-threads.txt ledger) ────────────────────
@@ -642,6 +664,32 @@ def clear_learned_notes(conn: sqlite3.Connection, account: str, sender_email: st
     )
 
 
+def learned_note_summaries(
+    conn: sqlite3.Connection, account: Optional[str] = None, *, limit: int = 100
+) -> list[LearnedNoteSummaryRow]:
+    """Senders that have a learned note — the note's LENGTH only, never its text.
+
+    Privacy-preserving projection for the status tool: surfacing distilled prose
+    (which derives from untrusted email content) into a chat surface is avoided —
+    the owner reads the full note via the sender-profile tool. One account, or
+    (``account=None``) all accounts. Newest-updated first.
+    """
+    sql = (
+        "SELECT account, sender_email, length(learned_notes) AS note_chars, "
+        "learned_updated_ms AS updated_ms FROM sender_profiles "
+        "WHERE learned_notes IS NOT NULL AND learned_notes != ''"
+    )
+    params: list = []
+    if account:
+        sql += " AND account = ?"
+        params.append(account)
+    sql += " ORDER BY learned_updated_ms DESC LIMIT ?"
+    params.append(limit)
+    return cast(
+        "list[LearnedNoteSummaryRow]", _as_dicts(conn.execute(sql, params).fetchall())
+    )
+
+
 # ── Draft feedback: outcome pairing ledger + gold examples ────────────────────────
 
 def upsert_draft_outcome_draft(
@@ -765,6 +813,23 @@ def mark_outcome_learned(conn: sqlite3.Connection, account: str, thread_id: str)
     )
 
 
+def mark_outcome_no_reply(conn: sqlite3.Connection, account: str, thread_id: str) -> bool:
+    """Flip a still-``pending`` drafted row to ``no_reply``; True iff it actually flipped.
+
+    Conditional (G1): the ``WHERE outcome = 'pending'`` guard means a send that
+    ``on_sent`` recorded between the sweep's read and this write is never clobbered
+    (the row is no longer 'pending' → rowcount 0). The caller owns the M1 liveness
+    decision (managed + not reconnecting + drained-after-draft) before calling this.
+    """
+    cur = conn.execute(
+        """UPDATE draft_outcomes
+              SET outcome = 'no_reply', updated_at_ms = ?
+            WHERE account = ? AND thread_id = ? AND outcome = 'pending'""",
+        (now_ms(), account, thread_id),
+    )
+    return cur.rowcount == 1
+
+
 def recent_sent_examples(
     conn: sqlite3.Connection, account: str, sender_email: str, *, limit: int
 ) -> list[DraftOutcomeRow]:
@@ -791,6 +856,19 @@ def count_outcomes_by_sender(
         (account, sender_email),
     ).fetchall()
     return {r["outcome"]: r["n"] for r in rows}
+
+
+def outcome_histogram(
+    conn: sqlite3.Connection, account: Optional[str] = None
+) -> dict[str, int]:
+    """Outcome counts ``{outcome: n}`` for one account, or (``account=None``) all accounts."""
+    sql = "SELECT outcome, count(*) AS n FROM draft_outcomes"
+    params: list = []
+    if account:
+        sql += " WHERE account = ?"
+        params.append(account)
+    sql += " GROUP BY outcome"
+    return {r["outcome"]: r["n"] for r in conn.execute(sql, params).fetchall()}
 
 
 def delete_learned_outcomes_older_than(
@@ -848,6 +926,19 @@ def top_lessons(
             ORDER BY evidence_count DESC, last_seen_ms DESC
             LIMIT ?""",
         (account, limit),
+    ).fetchall()
+    return cast("list[DraftLessonRow]", _as_dicts(rows))
+
+
+def all_active_lessons(conn: sqlite3.Connection, *, limit: int) -> list[DraftLessonRow]:
+    """Active lessons across ALL accounts, ranked by evidence then recency (the status
+    tool's unscoped view). Use :func:`top_lessons` to scope to one account."""
+    rows = conn.execute(
+        """SELECT * FROM draft_lessons
+            WHERE active = 1
+            ORDER BY evidence_count DESC, last_seen_ms DESC
+            LIMIT ?""",
+        (limit,),
     ).fetchall()
     return cast("list[DraftLessonRow]", _as_dicts(rows))
 

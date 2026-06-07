@@ -40,20 +40,25 @@ _MAX_BODY = 2000
 
 # Ordered, precision-first patterns. All linear-time + bounded (no ReDoS): the
 # code must sit next to a code cue, or be a distinctive Google ``G-`` code.
+# The code's trailing edge uses ``(?!\d)`` rather than ``\b`` so a code glued to
+# the next word — common when HTML->text strips whitespace, e.g. IKEA's
+# "one-time code:123456Please" — still matches, while still refusing to slice a
+# longer digit run. The leading edge uses ``(?<!\d)`` for the same reason.
 _CODE_PATTERNS = (
-    # "...code is 123456", "code: 123456", "OTP 4821", "passcode (1234)", "code: G-123456"
+    # "...code is 123456", "code: 123456", "OTP 4821", "passcode (1234)",
+    # "one-time code:123456Please", "code: G-123456"
     re.compile(
         r"\b(?:code|passcode|otp|pin|one[\s-]?time password)\b(?:\s+is)?\s*[:=]?\s*\(?"
-        r"(G-\d{4,8}|\d{3}[\s-]\d{3}|\d{4,8})\b",
+        r"(G-\d{4,8}|\d{3}[\s-]\d{3}|\d{4,8})(?!\d)",
         re.IGNORECASE,
     ),
     # "123456 is your verification code"
     re.compile(
-        r"\b(G-\d{4,8}|\d{4,8})\b\s+is\s+your\b[^.\n]{0,30}?\b(?:code|passcode|otp|pin)\b",
+        r"(?<!\d)(G-\d{4,8}|\d{4,8})(?!\d)\s+is\s+your\b[^.\n]{0,30}?\b(?:code|passcode|otp|pin)\b",
         re.IGNORECASE,
     ),
     # Distinctive Google style anywhere, even without an adjacent cue word.
-    re.compile(r"\b(G-\d{4,8})\b"),
+    re.compile(r"\b(G-\d{4,8})(?!\d)"),
 )
 
 _ANGLE_ADDR_RE = re.compile(r"<([^>]+)>")

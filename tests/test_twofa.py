@@ -42,6 +42,21 @@ def test_detect_code_common_phrasings():
     assert detect_code({"body": "Your code is 482 913 now"}) == "482 913"
 
 
+def test_detect_code_glued_to_following_word():
+    # Real IKEA format: HTML->text strips whitespace, gluing the code to the next
+    # word ("code:481516Please"). A trailing \b misses it; (?!\d) catches it.
+    body = (
+        "Enter these 6 digits where you requested your one-time "
+        "code:481516Please don't share your one-time code."
+    )
+    assert (
+        detect_code(
+            {"subject": "Your one-time code to access your IKEA account", "body": body}
+        )
+        == "481516"
+    )
+
+
 def test_detect_code_from_subject():
     assert detect_code({"subject": "Your login code is 246802", "body": ""}) == "246802"
 

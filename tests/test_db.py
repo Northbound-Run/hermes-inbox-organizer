@@ -457,7 +457,9 @@ def test_pending_outcomes_older_than(tmp_path) -> None:
         "UPDATE draft_outcomes SET draft_created_ms = 1000 WHERE thread_id = 't-old'"
     )
     conn.execute(
-        "UPDATE draft_outcomes SET draft_created_ms = 9_000_000_000_000 WHERE thread_id = 't-new'"
+        # plain digits (no Python-style `_` separators): SQLite only accepts `_`
+        # in numeric literals since 3.46, and CI runners ship older SQLite.
+        "UPDATE draft_outcomes SET draft_created_ms = 9000000000000 WHERE thread_id = 't-new'"
     )
     old = db.pending_outcomes_older_than(conn, before_ms=5000)
     assert {r["thread_id"] for r in old} == {"t-old"}

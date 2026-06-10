@@ -1,0 +1,103 @@
+name: Release
+
+# Build and publish to PyPI via OIDC Trusted Publishing — no API token is stored
+# in the repo. See https://docs.pypi.org/trusted-publishers/
+#
+# ── One-time setup ───────────────────────────────────────────────────────────
+# 1. PyPI → "Publishing" (or add a *pending* publisher before the first upload)
+#    → add a GitHub Actions trusted publisher:
+#        owner       = <your github owner/org>
+#        repository  = hermes-inbox-organizer
+#        workflow    = release.yml
+#        environment = pypi
+#    Repeat on test.pypi.org with environment = testpypi.
+# 2. GitHub → Settings → Environments → create `pypi` and `testpypi`
+#    (add required reviewers on `pypi` if you want a manual approval gate).
+#
+# ── Usage ────────────────────────────────────────────────────────────────────
+#   • Release to PyPI:   git tag v0.1.0 && git push origin v0.1.0
+#   • Dry run (TestPyPI): Actions → Release → "Run workflow" → target = testpypi
+#
+# The build job asserts the tag (vX.Y.Z) matches `project.version` in
+# pyproject.toml, so a forgotten version bump fails before anything is published.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Publish target (manual runs only)"
+        type: choice
+        options: [testpypi, pypi]
+        default: testpypi
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build + check distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+      - name: Check metadata
+        run: twine check --strict dist/*
+      - name: Verify tag matches package version
+        if: github.event_name == 'push'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")"
+          echo "tag=$tag  pyproject=$pkg"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::Tag v$tag does not match pyproject version $pkg — bump the version before tagging."
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  testpypi:
+    name: Publish to TestPyPI
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/hermes-inbox-organizer
+    permissions:
+      id-token: write  # OIDC token for Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  pypi:
+    name: Publish to PyPI
+    needs: build
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/hermes-inbox-organizer
+    permissions:
+      id-token: write  # OIDC token for Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

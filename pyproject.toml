@@ -69,4 +69,11 @@ build-backend = "setuptools.build_meta"
 include = ["hermes_inbox_organizer*"]
 
 [tool.setuptools.package-data]
-hermes_inbox_organizer = ["plugin.yaml"]
+# plugin.yaml (CLI/gateway manifest) + the dashboard UI plugin assets projected
+# into $HERMES_HOME at runtime (see hermes_inbox_organizer.dashboard_assets).
+hermes_inbox_organizer = [
+  "plugin.yaml",
+  "dashboard/manifest.json",
+  "dashboard/plugin_api.py",
+  "dashboard/dist/*",
+]

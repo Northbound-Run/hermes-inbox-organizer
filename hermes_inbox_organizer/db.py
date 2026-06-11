@@ -286,6 +286,20 @@ CREATE TABLE IF NOT EXISTS draft_lessons (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_lesson_dedup ON draft_lessons (account, scope, polarity, norm_rule);
 CREATE INDEX IF NOT EXISTS idx_lesson_rank ON draft_lessons (account, active, evidence_count DESC, last_seen_ms DESC);
+
+-- Dashboard connect flow: short-lived PKCE pending state. The web dashboard runs
+-- in a SEPARATE process from the gateway/daemon, so the in-memory
+-- ``oauth.PendingStore`` the chat connect tools use is unreachable there — the
+-- ``code_verifier`` is stashed here between connect/start and connect/complete
+-- instead. Single-owner: keyed by the opaque ``state`` only (no sender). Holds NO
+-- token/PII, just the short-lived verifier; consumed single-use + swept by TTL. A
+-- new table, so it is created via CREATE TABLE IF NOT EXISTS on the next connect
+-- (no schema-version bump needed).
+CREATE TABLE IF NOT EXISTS oauth_pending (
+    state          TEXT PRIMARY KEY,
+    verifier       TEXT NOT NULL,
+    created_at_ms  INTEGER NOT NULL
+);
 """
 
 _INITIALIZED_PATHS: set[str] = set()
@@ -1086,3 +1100,39 @@ def list_tracked_packages(
         sql += " WHERE " + " AND ".join(clauses)
     sql += " ORDER BY updated_at_ms DESC"
     return cast("list[TrackedPackageRow]", _as_dicts(conn.execute(sql, params).fetchall()))
+
+
+# ── OAuth pending (dashboard copy-paste connect; see dashboard_api) ───────────────
+
+def create_oauth_pending(conn: sqlite3.Connection, *, state: str, verifier: str) -> None:
+    """Stash a PKCE ``verifier`` for an in-flight dashboard connect, keyed by ``state``."""
+    conn.execute(
+        "INSERT OR REPLACE INTO oauth_pending (state, verifier, created_at_ms) VALUES (?, ?, ?)",
+        (state, verifier, now_ms()),
+    )
+
+
+def take_oauth_pending(
+    conn: sqlite3.Connection, state: str, *, ttl_ms: int, now_ms: int
+) -> Optional[str]:
+    """Consume + return the PKCE verifier for ``state`` (single-use), else None.
+
+    Always deletes the row (one shot), and returns None when it is missing or older
+    than ``ttl_ms`` — so a stale/expired connect can't be completed. ``now_ms`` is a
+    parameter for testability (mirrors :func:`claim_draft`)."""
+    row = conn.execute(
+        "SELECT verifier, created_at_ms FROM oauth_pending WHERE state = ?", (state,)
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute("DELETE FROM oauth_pending WHERE state = ?", (state,))
+    if now_ms - row["created_at_ms"] > ttl_ms:
+        return None
+    return row["verifier"]
+
+
+def sweep_oauth_pending(conn: sqlite3.Connection, *, before_ms: int) -> int:
+    """Delete pending rows created at/before ``before_ms`` (TTL GC). Returns the count."""
+    return conn.execute(
+        "DELETE FROM oauth_pending WHERE created_at_ms <= ?", (before_ms,)
+    ).rowcount

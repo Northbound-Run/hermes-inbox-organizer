@@ -113,6 +113,9 @@ class InboxRuntime:
         db_path: Optional[str] = None,
         on_auth_failure: Optional[Callable[[str], None]] = None,
         registry: Optional[Any] = None,
+        list_account_fingerprints: Optional[Callable[[], dict[str, str]]] = None,
+        build_account: Optional[Callable[[str], "Account"]] = None,
+        on_account_added: Optional[Callable[[str], None]] = None,
     ) -> None:
         self._accounts = list(accounts)
         self._by_email = {a.email: a for a in self._accounts}
@@ -125,6 +128,14 @@ class InboxRuntime:
         self._db_path = db_path or get_config().db_path
         self._on_auth_failure = on_auth_failure
         self._registry = registry  # module registry; None => legacy single-classifier path
+        # Account-reconciler seams: converge the managed set with the on-disk tokens
+        # so an out-of-process connect/disconnect (the dashboard, a separate process)
+        # takes effect on the next poll tick. None => reconcile is a no-op (unit tests
+        # of the legacy paths, and any deployment that doesn't wire them).
+        self._list_account_fingerprints = list_account_fingerprints
+        self._build_account = build_account
+        self._on_account_added = on_account_added
+        self._seen_token_fps: dict[str, str] = {}  # email -> last token fingerprint we acted on
         self._auth_failed: set[str] = set()  # accounts already flagged for reconnect
         self._future = None
         # Reentrant: a drain under the lock can call remove_account (auth failure)
@@ -285,6 +296,54 @@ class InboxRuntime:
         logger.info("inbox runtime: removed account %s", email)
         return True
 
+    def reconcile_accounts(self) -> None:
+        """Converge the managed account set with the on-disk tokens.
+
+        Lets an out-of-process connect/disconnect (the web dashboard runs in a
+        SEPARATE process and can only mutate the shared token files) take effect
+        without a restart. Each tick:
+
+        * token file gone        -> ``remove_account`` (disconnected elsewhere)
+        * new email              -> ``add_account`` (connected elsewhere)
+        * same email, file changed (a fresh token after e.g. a 7-day expiry +
+          reconnect) -> re-add, so it comes back live; ``on_account_added`` clears
+          the owner-facing reconnect nudge.
+
+        A token whose fingerprint is unchanged and that isn't currently managed
+        (failed to arm / dead) is skipped until its file changes again — so a dead
+        token sitting on disk isn't re-armed every tick. No-op unless the seams are
+        wired (see ``__init__``)."""
+        if self._list_account_fingerprints is None or self._build_account is None:
+            return
+        try:
+            fingerprints = self._list_account_fingerprints()
+        except Exception:
+            logger.exception("inbox runtime: account reconcile — failed to list tokens; skipping")
+            return
+        with self._lock:
+            current = set(self._by_email)
+        desired = set(fingerprints)
+        for email in current - desired:
+            self.remove_account(email)
+            self._seen_token_fps.pop(email, None)
+        for email, fp in fingerprints.items():
+            if email in self._by_email:
+                self._seen_token_fps[email] = fp
+                continue
+            if self._seen_token_fps.get(email) == fp:
+                continue  # already tried this exact token; wait for it to change
+            self._seen_token_fps[email] = fp  # record first so a bad token isn't retried each tick
+            try:
+                added = self.add_account(self._build_account(email))
+            except Exception:
+                logger.info("inbox runtime: reconcile could not add %s (token may be invalid)", email)
+                continue
+            if added and self._on_account_added is not None:
+                try:
+                    self._on_account_added(email)
+                except Exception:
+                    logger.exception("inbox runtime: on_account_added callback failed for %s", email)
+
     def _note_auth_failure(self, email: str) -> None:
         """Flag a dead-credential account for reconnect (once) and drop it from routing."""
         first = email not in self._auth_failed
@@ -321,10 +380,16 @@ class InboxRuntime:
     def _poll_once(self) -> None:
         """One reconciliation pass: drain each account from its stored cursor.
 
-        Skips an account with no cursor yet (``start`` seeds it from watch()).
-        Holds ``self._lock`` per account so a poll and a live notification can't
-        double-drain the same mailbox.
+        First reconciles the managed set with the on-disk tokens (so an
+        out-of-process connect/disconnect converges here), then skips an account
+        with no cursor yet (``start`` seeds it from watch()). Holds ``self._lock``
+        per account so a poll and a live notification can't double-drain the same
+        mailbox.
         """
+        try:
+            self.reconcile_accounts()
+        except Exception:
+            logger.exception("inbox runtime: account reconcile pass failed")
         for account in list(self._by_email.values()):
             with self._lock:
                 if account.email not in self._by_email:

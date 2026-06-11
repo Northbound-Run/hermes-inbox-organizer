@@ -467,3 +467,88 @@ def test_dedup_wake_falls_back_to_minimal_when_brief_build_fails(tmp_path, monke
     rt._dedup_wake(thread_id="t1", account_id="a", sender="s@x", subject="j")
     assert len(woke) == 1
     assert woke[0]["instruction"] is None  # fallback signal -> wake_draft rebuilds w/ sentinel
+
+
+# ── Account reconciler (out-of-process connect/disconnect convergence) ────────────
+
+def _arm_ok(monkeypatch):
+    """Stub label-ensure + watch-arm so add_account works without Google."""
+    import hermes_inbox_organizer.labels_apply as la
+    import hermes_inbox_organizer.runtime as rt_mod
+
+    monkeypatch.setattr(la, "ensure_labels", lambda svc: {})
+    monkeypatch.setattr(rt_mod, "arm_watch", lambda svc, topic: ("100", 123))
+
+
+def test_reconcile_adds_new_and_removes_disconnected(tmp_path, monkeypatch) -> None:
+    _arm_ok(monkeypatch)
+    fps = {"new@gmail.com": "1"}
+    built, added_cb = [], []
+
+    def build_account(email):
+        built.append(email)
+        return Account(email=email, build_service=lambda: object())
+
+    rt = InboxRuntime(
+        accounts=[Account(email="old@gmail.com", build_service=lambda: _StoppableService())],
+        project="p", topic="t", subscription="s", sa_key_path="x", db_path=_dbp(tmp_path),
+        list_account_fingerprints=lambda: fps,
+        build_account=build_account,
+        on_account_added=added_cb.append,
+    )
+    rt.reconcile_accounts()
+    # old@ managed but token gone -> removed; new@ on disk but not managed -> added
+    assert "new@gmail.com" in rt._by_email
+    assert "old@gmail.com" not in rt._by_email
+    assert built == ["new@gmail.com"] and added_cb == ["new@gmail.com"]
+
+
+def test_reconcile_skips_unchanged_dead_token_then_readds_on_change(tmp_path, monkeypatch) -> None:
+    import hermes_inbox_organizer.labels_apply as la
+    import hermes_inbox_organizer.runtime as rt_mod
+
+    monkeypatch.setattr(la, "ensure_labels", lambda svc: {})
+    arm_calls = {"n": 0}
+
+    def flaky_arm(svc, topic):
+        arm_calls["n"] += 1
+        if arm_calls["n"] == 1:
+            raise RuntimeError("invalid_grant")  # dead token on first attempt
+        return ("100", 123)
+
+    monkeypatch.setattr(rt_mod, "arm_watch", flaky_arm)
+    fp = {"a@gmail.com": "v1"}
+    rt = InboxRuntime(
+        accounts=[], project="p", topic="t", subscription="s", sa_key_path="x", db_path=_dbp(tmp_path),
+        list_account_fingerprints=lambda: dict(fp),
+        build_account=lambda email: Account(email=email, build_service=lambda: object()),
+    )
+    rt.reconcile_accounts()                 # add attempt fails (arm raises)
+    assert "a@gmail.com" not in rt._by_email
+    rt.reconcile_accounts()                 # same fingerprint -> skipped (no re-arm)
+    assert arm_calls["n"] == 1
+    fp["a@gmail.com"] = "v2"                 # token reconnected (file mtime changed)
+    rt.reconcile_accounts()                 # changed fingerprint -> retried -> armed
+    assert "a@gmail.com" in rt._by_email and arm_calls["n"] == 2
+
+
+def test_reconcile_is_noop_without_seams(tmp_path) -> None:
+    rt = InboxRuntime(
+        accounts=[Account(email="a@gmail.com", build_service=lambda: object())],
+        project="p", topic="t", subscription="s", sa_key_path="x", db_path=_dbp(tmp_path),
+    )
+    rt.reconcile_accounts()  # seams unwired -> no-op; the managed set is untouched
+    assert "a@gmail.com" in rt._by_email
+
+
+def test_poll_once_runs_account_reconcile(tmp_path, monkeypatch) -> None:
+    # Integration: _poll_once reconciles before draining, so a dashboard connect
+    # (a new token on disk) goes live on the next tick.
+    _arm_ok(monkeypatch)
+    rt = InboxRuntime(
+        accounts=[], project="p", topic="t", subscription="s", sa_key_path="x", db_path=_dbp(tmp_path),
+        list_account_fingerprints=lambda: {"new@gmail.com": "1"},
+        build_account=lambda email: Account(email=email, build_service=lambda: object()),
+    )
+    rt._poll_once()
+    assert "new@gmail.com" in rt._by_email

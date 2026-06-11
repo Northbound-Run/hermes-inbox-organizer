@@ -15,12 +15,14 @@ and `2: FYI` stay in the inbox; the rest skip-inbox and archive. For
 voice (drafts only, never sent). When you reply, the thread moves to
 `7: Actioned`; when you send and are waiting, `6: Awaiting Reply`.
 
-No separate service, no public webhook, no HTTP server — it's one plugin that
-loads with the agent.
+No separate service and no public webhook — it's one plugin that loads with the
+agent. It can also add an optional **Inbox Organizer tab** to Hermes's own web
+dashboard for connecting/removing accounts ([docs/dashboard.md](docs/dashboard.md)).
 
 ## Capabilities
 
-- Multi-account Gmail (connect/disconnect by **chatting with Hermes**)
+- Multi-account Gmail (connect/disconnect by **chatting with Hermes**, or from an
+  optional **web dashboard tab** — [docs/dashboard.md](docs/dashboard.md))
 - Hybrid triage: deterministic header/sender rules + LLM fallback
 - Hermes-drafted replies for `1: To Respond`
 - Sent-handling (`Actioned` / `Awaiting Reply`)
@@ -142,10 +144,15 @@ turn), copy the `gateway:startup` hook from
 
 ### 4. Connect a Gmail account
 
-There's no web wizard — connect by **chatting with Hermes**: *"Connect a Gmail
-account."* The agent returns a Google consent link; approve it, paste the code
-from the callback page back, and the account is hot-added (owner-gated only).
-Repeat for additional mailboxes.
+Two ways — same copy-paste OAuth either way:
+
+- **Chat with Hermes** — *"Connect a Gmail account."* The agent returns a Google
+  consent link; approve it, paste the code from the callback page back, and the
+  account is hot-added (owner-gated). Repeat for additional mailboxes.
+- **Dashboard tab** — open Hermes's web dashboard and use the **Inbox Organizer**
+  tab to connect/remove accounts with buttons instead of tools. If the tab isn't
+  there yet, run `hermes inbox-organizer install-dashboard` once and restart
+  `hermes dashboard`. See [docs/dashboard.md](docs/dashboard.md).
 
 ### Verify
 
@@ -164,11 +171,12 @@ label within seconds (push) or a few minutes (the polling reconciler).
 
 ## Layout
 
-- **`hermes_inbox_organizer/`** — the plugin package (the module), with `tests/`,
-  `deploy/` (the `gateway:startup` boot hook), and `pyproject.toml` at the repo root.
+- **`hermes_inbox_organizer/`** — the plugin package (the module), including its
+  bundled `dashboard/` web-UI plugin; with `tests/`, `deploy/` (the
+  `gateway:startup` boot hook), and `pyproject.toml` at the repo root.
 - **`oauth-callback/`** — the static OAuth callback page (Cloudflare Pages) used
   by chat onboarding.
-- **`docs/`** — setup, Google Cloud, OAuth, sync, and security notes.
+- **`docs/`** — setup, Google Cloud, OAuth, sync, security, and dashboard notes.
 
 ## Develop
 

@@ -16,12 +16,30 @@ def _db(tmp_path) -> sqlite3.Connection:
 def test_connect_creates_schema_and_is_idempotent(tmp_path) -> None:
     conn = _db(tmp_path)
     names = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert {"accounts", "draft_requests", "classified_messages", "thread_state"} <= names
+    assert {"accounts", "draft_requests", "classified_messages", "thread_state", "oauth_pending"} <= names
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
     assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     # Re-connecting the same path is a no-op that keeps the data intact.
     conn2 = db.connect(tmp_path / "state.db")
     assert conn2.execute("SELECT count(*) FROM accounts").fetchone()[0] == 0
+
+
+def test_oauth_pending_single_use_ttl_and_sweep(tmp_path) -> None:
+    conn = _db(tmp_path)
+    db.create_oauth_pending(conn, state="s1", verifier="v1")
+    # fresh take returns the verifier exactly once (single-use)
+    assert db.take_oauth_pending(conn, "s1", ttl_ms=1000, now_ms=db.now_ms()) == "v1"
+    assert db.take_oauth_pending(conn, "s1", ttl_ms=1000, now_ms=db.now_ms()) is None
+    # an expired pending is rejected AND removed
+    db.create_oauth_pending(conn, state="s2", verifier="v2")
+    base = conn.execute("SELECT created_at_ms FROM oauth_pending WHERE state='s2'").fetchone()[0]
+    assert db.take_oauth_pending(conn, "s2", ttl_ms=10, now_ms=base + 11) is None
+    assert conn.execute("SELECT 1 FROM oauth_pending WHERE state='s2'").fetchone() is None
+    # sweep drops rows created at/before the cutoff
+    db.create_oauth_pending(conn, state="s3", verifier="v3")
+    cutoff = conn.execute("SELECT created_at_ms FROM oauth_pending WHERE state='s3'").fetchone()[0]
+    assert db.sweep_oauth_pending(conn, before_ms=cutoff) == 1
+    assert conn.execute("SELECT count(*) FROM oauth_pending").fetchone()[0] == 0
 
 
 def test_cursor_roundtrip_and_isolation(tmp_path) -> None:

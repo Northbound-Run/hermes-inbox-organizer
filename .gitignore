@@ -4,6 +4,9 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+# ...but dashboard/dist/ is the hand-written dashboard plugin bundle (source, no
+# build step), not a build artifact — keep it tracked despite the rule above.
+!hermes_inbox_organizer/dashboard/dist/
 .eggs/
 
 # Virtualenvs / tooling caches

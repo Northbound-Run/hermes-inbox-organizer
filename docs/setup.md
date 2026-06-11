@@ -59,6 +59,11 @@ A `gateway:startup` hook (in `deploy/hooks/`, installed into the
 volume by the entrypoint) starts the daemon at boot so it doesn't wait for the
 first agent turn. See [hermes-wiring.md](./hermes-wiring.md).
 
+The entrypoint also projects the package's bundled `dashboard/` UI plugin into
+`$HERMES_HOME/plugins/inbox_organizer/dashboard/` so the Hermes web dashboard shows
+an **Inbox Organizer** tab (connect/remove accounts). `register()` self-projects it
+too, so it also works on a plain `pip install`. See [dashboard.md](./dashboard.md).
+
 ## 4. Deploy
 
 ```sh
@@ -66,16 +71,18 @@ first agent turn. See [hermes-wiring.md](./hermes-wiring.md).
 docker compose build hermes && docker compose up -d hermes
 ```
 
-## 5. Connect a Gmail account — by chatting
+## 5. Connect a Gmail account
 
-There is no web wizard. Tell your Hermes agent to connect an account:
+Two ways — same copy-paste OAuth either way:
 
-> "Connect a Gmail account."
-
-The agent calls `inbox_connect_account`, returns a Google consent link, you
-approve, the static callback page shows a code, you paste it back, and
-`inbox_complete_connection` stores the encrypted token and hot-adds the account.
-(Only the owner — per `owner_matrix_ids` — may run these tools.)
+- **By chatting** — tell your Hermes agent *"Connect a Gmail account."* It calls
+  `inbox_connect_account`, returns a Google consent link, you approve, the static
+  callback page shows a code, you paste it back, and `inbox_complete_connection`
+  stores the encrypted token and hot-adds the account. (Only the owner — per
+  `owner_matrix_ids` — may run these tools.)
+- **From the dashboard** — the **Inbox Organizer** tab in the Hermes web dashboard
+  has Connect/Remove buttons. See [dashboard.md](./dashboard.md) for the auth model
+  (the dashboard's own access control is the gate) and the dashboard-restart note.
 
 ## Verify
 
@@ -89,4 +96,5 @@ approve, the static callback page shows a code, you paste it back, and
 - [oauth-modes.md](./oauth-modes.md) — Testing vs Production OAuth audience
 - [sync-modes.md](./sync-modes.md) — how sync works (streaming pull + reconciler)
 - [security.md](./security.md) — security model
+- [dashboard.md](./dashboard.md) — the web-dashboard tab (connect/remove accounts)
 - [hermes-wiring.md](./hermes-wiring.md) — config + the agent tool surface

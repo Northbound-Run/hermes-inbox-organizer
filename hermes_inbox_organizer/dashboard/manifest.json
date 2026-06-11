@@ -1,0 +1,13 @@
+{
+  "name": "inbox_organizer",
+  "label": "Inbox Organizer",
+  "description": "Connect and manage the Google accounts triaged by the Inbox Organizer plugin.",
+  "icon": "MessageSquare",
+  "version": "0.1.0",
+  "tab": {
+    "path": "/inbox-organizer",
+    "position": "end"
+  },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}

@@ -205,6 +205,18 @@ def register(ctx: Any) -> InboxDaemon:
 
     Returns the constructed :class:`InboxDaemon` for tests/inspection.
     """
+    # 0. Project the dashboard plugin into $HERMES_HOME so the web dashboard shows
+    # an Inbox Organizer tab (dashboard plugins are directory-discovered — there is
+    # no entry-point hook like the one that loads this CLI/gateway plugin). This is
+    # how `pip install` users get the UI; the baked image entrypoint also projects
+    # it (parity with the plugin.yaml shim + boot hook). Never fatal to load.
+    try:
+        from .dashboard_assets import project as _project_dashboard
+
+        _project_dashboard()
+    except Exception:
+        logger.exception("inbox: dashboard asset projection failed (UI tab may be absent)")
+
     # 1. Native tool: the write-back primitive the agent calls.
     ctx.register_tool(
         name="inbox_create_draft",
@@ -419,6 +431,19 @@ def register(ctx: Any) -> InboxDaemon:
             "Diagnostic: push a test message to the notify channel (home / INBOX_NOTIFY_TARGET)",
         )
 
+    # 4b. CLI subcommand: `hermes inbox-organizer install-dashboard` re-projects the
+    # dashboard UI — covers pip installs that add/upgrade the plugin out of band.
+    if hasattr(ctx, "register_cli_command"):
+        from .dashboard_assets import cli_handler as _dash_cli_handler
+        from .dashboard_assets import setup_cli as _dash_setup_cli
+
+        ctx.register_cli_command(
+            name="inbox-organizer",
+            help="Manage the Inbox Organizer plugin (e.g. install-dashboard)",
+            setup_fn=_dash_setup_cli,
+            handler_fn=_dash_cli_handler,
+        )
+
     daemon.start()
     try:
         _maybe_start_runtime(registry)
@@ -530,6 +555,9 @@ def _maybe_start_runtime(registry: Any = None):
         db_path=get_config().db_path,
         wake_fn=wake_draft,
         on_auth_failure=_NEEDS_RECONNECT.add,
+        list_account_fingerprints=_account_fingerprints,
+        build_account=_build_account,
+        on_account_added=_NEEDS_RECONNECT.discard,
         registry=registry,
     )
     global _RUNTIME
@@ -647,6 +675,32 @@ def _load_all_tokens() -> dict[str, Any]:
             logger.exception("inbox: failed to load token %s", path)
             continue
         out[tok.email] = tok
+    return out
+
+
+def _account_fingerprints() -> dict[str, Any]:
+    """email -> token-file mtime, a cheap change signal for the runtime reconciler.
+
+    Same source as :func:`_load_all_tokens` but returns each account's file mtime
+    instead of the token. The poll reconciler diffs this against its managed set to
+    converge an out-of-process connect/disconnect (the dashboard), and the mtime
+    lets it spot a freshly reconnected account (the file is only rewritten on
+    connect) and re-arm it without a restart."""
+    key_path = os.environ.get("INBOX_KEY_FILE", "/opt/data/config/inbox-encryption-key")
+    token_dir = os.environ.get("INBOX_TOKEN_DIR", "/opt/data/inbox-organizer/accounts")
+    if not os.path.exists(key_path):
+        return {}
+    from .token_store import load_token
+
+    key = open(key_path).read().strip()
+    out: dict[str, Any] = {}
+    for path in sorted(glob.glob(os.path.join(token_dir, "*.json"))):
+        try:
+            tok = load_token(key, path)
+            out[tok.email] = str(os.path.getmtime(path))
+        except Exception:
+            logger.exception("inbox: failed to fingerprint token %s", path)
+            continue
     return out
 
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .config import get_config
 from .gmail import parse_message
 from .labels import category_by_name, label_name
 from .modules.base import SentEvent
@@ -84,6 +85,10 @@ def handle_sent(
     When a module ``registry`` is given, fires ``registry.dispatch_sent`` (offloaded
     observers) after the thread is moved. ``registry=None`` preserves the legacy
     behavior so the routing is unit-tested without modules.
+
+    With the label system disabled (``INBOX_LABELS_ENABLED=0``) the thread move is
+    skipped, but the SentEvent (carrying the computed target) still dispatches so
+    observers — e.g. the draft-feedback loop — keep learning from sent mail.
     """
     msg = (
         service.users().messages().get(userId="me", id=message_id, format="full").execute()
@@ -93,34 +98,38 @@ def handle_sent(
         return ""
     parsed = parse_message(msg)
 
-    thread = (
-        service.users().threads().get(userId="me", id=thread_id, format="minimal").execute()
-    )
-    present: set[str] = set()
-    for m in thread.get("messages", []) or []:
-        present.update(m.get("labelIds") or [])
-
+    # The presence check needs the thread only when the To Respond label id is
+    # known (with the label system disabled, label_ids is empty — skip the read).
     to_respond = _label_id(label_ids, "To Respond")
-    to_respond_present = bool(to_respond and to_respond in present)
+    to_respond_present = False
+    if to_respond:
+        thread = (
+            service.users().threads().get(userId="me", id=thread_id, format="minimal").execute()
+        )
+        present: set[str] = set()
+        for m in thread.get("messages", []) or []:
+            present.update(m.get("labelIds") or [])
+        to_respond_present = to_respond in present
     awaits = sent_awaits_reply(parsed.get("body", ""))
 
     # Actioned only when you closed a flagged thread with no open ask of your own;
     # if your reply asks something (or it's a fresh outbound) you're Awaiting Reply.
     target_name = "Actioned" if (to_respond_present and not awaits) else "Awaiting Reply"
 
-    target_id = _label_id(label_ids, target_name)
-    if not target_id:
-        return ""
+    if get_config().labels_enabled:
+        target_id = _label_id(label_ids, target_name)
+        if not target_id:
+            return ""
 
-    # Clear every other category across the thread (To Respond included — you've
-    # replied, so you no longer owe *them* a response) so no stale category like an
-    # earlier "2: FYI" lingers beside the new state. Archive too (skip inbox).
-    remove = ["INBOX"] + [lid for lid in label_ids.values() if lid != target_id]
-    service.users().threads().modify(
-        userId="me",
-        id=thread_id,
-        body={"addLabelIds": [target_id], "removeLabelIds": remove},
-    ).execute()
+        # Clear every other category across the thread (To Respond included — you've
+        # replied, so you no longer owe *them* a response) so no stale category like an
+        # earlier "2: FYI" lingers beside the new state. Archive too (skip inbox).
+        remove = ["INBOX"] + [lid for lid in label_ids.values() if lid != target_id]
+        service.users().threads().modify(
+            userId="me",
+            id=thread_id,
+            body={"addLabelIds": [target_id], "removeLabelIds": remove},
+        ).execute()
     if registry is not None:
         registry.dispatch_sent(
             SentEvent(

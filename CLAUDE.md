@@ -19,7 +19,7 @@ The plugin package is `hermes_inbox_organizer/` at the repo root (the production
 ## Architecture
 - `register(ctx)` wires the agent tools + a `pre_llm_call` nudge hook and starts the daemon. A `gateway:startup` hook (`deploy/hooks/`) loads the plugin at boot so the daemon doesn't wait for the first agent turn.
 - Daemon: Gmail `watch()` → Pub/Sub **streaming pull** → drain history from the stored cursor → pre-classifier + OpenRouter LLM → apply numbered label → (`1: To Respond`) wake Hermes to draft. A **polling reconciler** re-drains on a timer in case a push is dropped.
-- 8 Fyxer-style numbered labels (`1: To Respond` … `8: Marketing`); only To Respond + FYI stay in the inbox, 3–8 skip-inbox + archive. The sent-handler moves a thread to `7: Actioned` (you replied) or `6: Awaiting Reply` (you sent + are waiting).
+- 8 Fyxer-style numbered labels (`1: To Respond` … `8: Marketing`); only To Respond + FYI stay in the inbox, 3–8 skip-inbox + archive. The sent-handler moves a thread to `7: Actioned` (you replied) or `6: Awaiting Reply` (you sent + are waiting). `INBOX_LABELS_ENABLED=0` switches the whole label system off (no label creation/apply, no archiving, no sent-handler moves) while classification, DB persistence, module dispatch, and draft wakes keep running.
 
 ## Security invariants
 - Untrusted email content is wrapped in randomized fences before any LLM prompt (`classifier.py`) — never let it steer the model.

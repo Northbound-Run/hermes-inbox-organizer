@@ -203,13 +203,20 @@ class InboxRuntime:
     def start(self) -> None:
         from .labels_apply import ensure_labels
 
-        # Arm each account independently: seed its labels, watch INBOX+SENT, and
-        # set its cursor. A broken account is dropped from routing rather than
-        # taking down the others (one shared subscription still feeds the rest).
+        if not get_config().labels_enabled:
+            logger.info(
+                "inbox runtime: label system disabled (INBOX_LABELS_ENABLED) — "
+                "classify/record/draft only, no mailbox mutations"
+            )
+
+        # Arm each account independently: seed its labels (unless the label system
+        # is disabled), watch INBOX+SENT, and set its cursor. A broken account is
+        # dropped from routing rather than taking down the others (one shared
+        # subscription still feeds the rest).
         for account in list(self._accounts):
             try:
                 service = account.build_service()
-                account.label_ids = ensure_labels(service)
+                account.label_ids = ensure_labels(service) if get_config().labels_enabled else {}
                 hid, account.watch_expiration = arm_watch(service, self._topic)
                 with contextlib.closing(self._db()) as conn:
                     if db.get_cursor(conn, account.email) is None:
@@ -250,7 +257,7 @@ class InboxRuntime:
             if account.email in self._by_email:
                 return False
             service = account.build_service()
-            account.label_ids = ensure_labels(service)
+            account.label_ids = ensure_labels(service) if get_config().labels_enabled else {}
             hid, account.watch_expiration = arm_watch(service, self._topic)
             with contextlib.closing(self._db()) as conn:
                 if db.get_cursor(conn, account.email) is None:

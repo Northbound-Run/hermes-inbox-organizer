@@ -11,6 +11,7 @@ from typing import Any, Callable, Optional
 
 from . import db
 from .classifier import classify as _classify
+from .config import get_config
 from .gmail import parse_message
 from .labels_apply import apply_category
 from .modules.base import InboundEvent
@@ -42,6 +43,10 @@ def process_message(
     (``registry.dispatch_inbound`` — observers, offloaded). With ``registry=None``
     the behavior is exactly the legacy path (``classify_fn``, no dispatch), so
     the routing is unit-tested without any modules.
+
+    With the label system disabled (``INBOX_LABELS_ENABLED=0``) the Gmail label
+    mutation is skipped; classification, persistence, module dispatch, and the
+    To-Respond wake all still run.
     """
     msg = (
         service.users()
@@ -52,7 +57,8 @@ def process_message(
     parsed = parse_message(msg)
     category = registry.classify(parsed) if registry is not None else classify_fn(parsed)
     thread_id = parsed.get("thread_id", "")
-    apply_category(service, message_id, category, label_ids, thread_id=thread_id)
+    if get_config().labels_enabled:
+        apply_category(service, message_id, category, label_ids, thread_id=thread_id)
     if conn is not None:
         db.record_classified_message(
             conn,
@@ -72,6 +78,7 @@ def process_message(
         )
     # Notification phase — only after a successful apply + persist, so a failed
     # mutation never fires observers (e.g. a 2FA push) for mail that wasn't labelled.
+    # (With labels disabled the apply is skipped by config, not failed — dispatch runs.)
     if registry is not None:
         registry.dispatch_inbound(
             InboundEvent(

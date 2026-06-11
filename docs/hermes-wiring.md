@@ -25,7 +25,7 @@ env — see [setup.md](./setup.md).
 | `config/inbox-pubsub-sa.json` | `pubsub.subscriber` SA key (streaming pull auth) |
 | `config/inbox-encryption-key` | AES-GCM key for tokens at rest |
 | env `OPENROUTER_API_KEY` | LLM-fallback classifier |
-| env `INBOX_*` (optional) | overrides — `INBOX_DATA_DIR`, `INBOX_DB_PATH`, `INBOX_CLASSIFIER_MODEL`, `INBOX_OWNER_MATRIX_IDS`, … (see `config.py`) |
+| env `INBOX_*` (optional) | overrides — `INBOX_DATA_DIR`, `INBOX_DB_PATH`, `INBOX_CLASSIFIER_MODEL`, `INBOX_OWNER_MATRIX_IDS`, `INBOX_LABELS_ENABLED` (off = classify/draft only, no labels or archiving), … (see `config.py`) |
 
 ## Agent tools
 

@@ -49,6 +49,11 @@ class Config:
     # Notifications (proactive push to the owner — see notifier.py).
     # OPTIONAL override; default destination is Hermes's /sethome home channel.
     notify_target: Optional[str]  # INBOX_NOTIFY_TARGET: a room/chat id, e.g. "!room:server"
+    # Core label system (the 8 numbered labels + archiving). Off = the plugin
+    # never mutates the mailbox: no label creation/apply, no archiving, no
+    # sent-handler thread moves. Classification, DB persistence, module
+    # dispatch, and To-Respond draft wakes all still run.
+    labels_enabled: bool  # INBOX_LABELS_ENABLED (default on)
     # Modules
     module_2fa_enabled: bool  # INBOX_2FA_ENABLED (default on)
     twofa_sender_allowlist: frozenset  # INBOX_2FA_SENDER_ALLOWLIST (lowercased addrs/domains; empty = push all)
@@ -128,6 +133,7 @@ def get_config() -> Config:
         wake_timeout_s=_env_int("INBOX_WAKE_TIMEOUT_S", 300),
         draft_research_enabled=_env_bool("INBOX_DRAFT_RESEARCH", True),
         notify_target=_env("INBOX_NOTIFY_TARGET"),
+        labels_enabled=_env_bool("INBOX_LABELS_ENABLED", True),
         module_2fa_enabled=_env_bool("INBOX_2FA_ENABLED", True),
         twofa_sender_allowlist=frozenset(twofa_allow),
         module_shipping_enabled=_env_bool("INBOX_SHIPPING_ENABLED", True),

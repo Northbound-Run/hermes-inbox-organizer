@@ -30,6 +30,30 @@ def test_project_respects_hermes_home_env(tmp_path, monkeypatch):
     assert dest == os.path.join(str(tmp_path), "plugins", "inbox_organizer", "dashboard")
 
 
+def test_project_tolerates_copy_failure_when_assets_present(tmp_path, monkeypatch):
+    # Simulate the shared-volume race: another process (the root gateway) already
+    # projected the assets, and our copy can't overwrite them (EPERM). We should
+    # use the existing copy, not raise/return None.
+    dest = tmp_path / "plugins" / "inbox_organizer" / "dashboard"
+    (dest / "dist").mkdir(parents=True)
+    (dest / "dist" / "index.js").write_text("// projected by the gateway")
+
+    def boom(*_a, **_k):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(dashboard_assets.shutil, "copytree", boom)
+    assert dashboard_assets.project(home=str(tmp_path)) == str(dest)
+
+
+def test_project_reports_failure_when_copy_fails_and_assets_absent(tmp_path, monkeypatch):
+    def boom(*_a, **_k):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(dashboard_assets.shutil, "copytree", boom)
+    # Nothing on disk + the copy failed → a real failure (None), surfaced/logged.
+    assert dashboard_assets.project(home=str(tmp_path)) is None
+
+
 def test_manifest_and_bundle_agree():
     # Guard against name drift across the three projected files — they all hinge on
     # the registration name "inbox_organizer" and the build_router() re-export.

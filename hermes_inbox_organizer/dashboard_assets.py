@@ -46,17 +46,36 @@ def packaged_dashboard_dir() -> str:
 def project(home: Optional[str] = None) -> Optional[str]:
     """Copy the packaged ``dashboard/`` into ``<home>/plugins/inbox_organizer/``.
 
-    Returns the destination ``dashboard/`` path, or ``None`` if the packaged
-    assets are missing. Idempotent (overwrites in place); ``__pycache__`` is not
-    copied.
+    Returns the destination ``dashboard/`` path, or ``None`` if the assets are
+    neither copied nor already present. Idempotent (overwrites in place);
+    ``__pycache__`` is not copied.
+
+    Tolerant of a shared data volume. In the containerized deployment BOTH the
+    gateway and the web-dashboard processes load this plugin and call ``project``,
+    but they run as different users: the gateway projects first as root, leaving
+    root-owned (world-readable) files; the dashboard process runs as a non-root
+    user and cannot overwrite them. That's fine — it only needs to READ them — so a
+    permission error when the assets are already present is downgraded to an info
+    log instead of a scary traceback (the gateway, as root, keeps them fresh on
+    each boot).
     """
     src = packaged_dashboard_dir()
     if not os.path.isdir(src):
         logger.warning("inbox-dashboard: packaged assets missing at %s — skipping projection", src)
         return None
     dest = os.path.join(home or hermes_home(), "plugins", PLUGIN_DIR_NAME, "dashboard")
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
-    shutil.copytree(src, dest, dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__"))
+    try:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.copytree(src, dest, dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__"))
+    except (shutil.Error, OSError) as exc:
+        if os.path.isfile(os.path.join(dest, "dist", "index.js")):
+            logger.info(
+                "inbox-dashboard: assets already projected by another process (%s); using existing copy at %s",
+                type(exc).__name__, dest,
+            )
+            return dest
+        logger.exception("inbox-dashboard: failed to project dashboard assets to %s", dest)
+        return None
     logger.info("inbox-dashboard: projected dashboard assets → %s", dest)
     return dest
 

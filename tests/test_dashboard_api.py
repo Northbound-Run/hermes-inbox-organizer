@@ -170,6 +170,36 @@ def test_disconnect_requires_email(tmp_path, monkeypatch):
     assert dashboard_api.disconnect("   ")["error"] == "email is required"
 
 
+def test_list_and_disconnect_dedup_multiple_files_per_email(tmp_path, monkeypatch):
+    # Two token FILES for the same account (an old slug + a re-connect). The daemon
+    # keys on email, so the dashboard should show ONE row and disconnect should
+    # remove BOTH files.
+    key = _paths(tmp_path, monkeypatch)
+    token_dir = tmp_path / "accounts"
+
+    def _write(name):
+        save_token(
+            AccountToken(
+                email="dup@gmail.com", refresh_token="r", client_id="c", client_secret="s",
+                token_uri="https://oauth2.googleapis.com/token",
+                scopes=["https://www.googleapis.com/auth/gmail.modify"],
+            ),
+            key, str(token_dir / name),
+        )
+
+    _write("dup_a.json")
+    _write("dup_b.json")
+
+    payload = dashboard_api.accounts_payload()
+    assert payload["count"] == 1 and payload["accounts"][0]["email"] == "dup@gmail.com"
+
+    revoked = []
+    out = dashboard_api.disconnect("dup@gmail.com", revoke=lambda rt: revoked.append(rt) or True)
+    assert out["ok"] is True and out["revoked"] is True
+    assert len(revoked) == 2  # revoked each file's token
+    assert dashboard_api.accounts_payload()["count"] == 0  # both files removed
+
+
 def test_build_router_exposes_routes():
     # FastAPI isn't a runtime dep — only assert the wiring where it's installed.
     pytest.importorskip("fastapi")

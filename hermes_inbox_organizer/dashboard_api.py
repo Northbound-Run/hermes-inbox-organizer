@@ -56,16 +56,18 @@ def list_accounts() -> list[dict[str, Any]]:
         logger.exception("inbox-dashboard: cannot read encryption key %s", cfg.key_file)
         return []
 
-    out: list[dict[str, Any]] = []
+    # Dedup by email: there can be more than one token file per account (an older
+    # filename slug plus a re-connect). The daemon keys on email too (its token map
+    # is a dict), so surface exactly one row per account — first file wins.
+    by_email: dict[str, dict[str, Any]] = {}
     for path in sorted(glob.glob(os.path.join(cfg.token_dir, "*.json"))):
         try:
             tok = token_store.load_token(key, path)
         except Exception:
             logger.warning("inbox-dashboard: skipping unreadable token blob %s", os.path.basename(path))
             continue
-        out.append({"email": tok.email, "scopes": list(tok.scopes or [])})
-    out.sort(key=lambda a: a["email"])
-    return out
+        by_email.setdefault(tok.email, {"email": tok.email, "scopes": list(tok.scopes or [])})
+    return [by_email[email] for email in sorted(by_email)]
 
 
 def accounts_payload() -> dict[str, Any]:
@@ -161,50 +163,61 @@ def connect_complete(
     return {"ok": True, "email": token.email}
 
 
-def _find_account_token(email: str):
-    """(path, AccountToken) for the connected ``email``, or (None, None).
+def _account_token_files(email: str) -> list[tuple[str, Any]]:
+    """All ``(path, AccountToken)`` pairs whose decrypted email matches.
 
-    Filename-agnostic (matches the decrypted address, like __init__._delete_account_token),
-    so a token saved under any slug is still found."""
+    Filename-agnostic (matches the decrypted address, like __init__._delete_account_token)
+    AND returns every match, not just the first — there can be more than one file per
+    account (an older filename slug plus a re-connect), and a disconnect must remove
+    them all."""
     cfg = config.get_config()
     if not os.path.exists(cfg.key_file):
-        return None, None
+        return []
     try:
         key = open(cfg.key_file).read().strip()
     except OSError:
-        return None, None
+        return []
+    out: list[tuple[str, Any]] = []
     for path in sorted(glob.glob(os.path.join(cfg.token_dir, "*.json"))):
         try:
             tok = token_store.load_token(key, path)
         except Exception:
             continue
         if tok.email == email:
-            return path, tok
-    return None, None
+            out.append((path, tok))
+    return out
 
 
 def disconnect(
     email: str, *, revoke: Callable[[str], bool] = oauth.revoke_token
 ) -> dict[str, Any]:
     """Disconnect an account: revoke its refresh token at Google (best effort) +
-    delete the stored blob. Returns ``{ok, email, revoked, deleted}`` or ``{error}``.
+    delete the stored blob(s). Returns ``{ok, email, revoked, deleted}`` or
+    ``{error}``. Removes ALL token files for the email (handles duplicate slugs).
     The daemon (a separate process) drops it from routing on its next reconcile tick
-    — this only mutates the shared token file. ``revoke`` is a seam for tests."""
+    — this only mutates the shared token files. ``revoke`` is a seam for tests."""
     email = (email or "").strip()
     if not email:
         return {"error": "email is required"}
-    path, tok = _find_account_token(email)
-    if path is None or tok is None:
+    matches = _account_token_files(email)
+    if not matches:
         return {"error": f"no connected account found for {email!r}"}
-    try:
-        revoked = bool(revoke(tok.refresh_token))
-    except Exception:
-        revoked = False
-    try:
-        os.remove(path)
-    except OSError as exc:
-        logger.exception("inbox-dashboard: failed to delete token for %s", email)
-        return {"error": f"could not delete the stored token: {exc}"}
+    revoked = False
+    for _path, tok in matches:
+        try:
+            if revoke(tok.refresh_token):
+                revoked = True
+        except Exception:
+            pass
+    deleted = 0
+    for path, _tok in matches:
+        try:
+            os.remove(path)
+            deleted += 1
+        except OSError:
+            logger.exception("inbox-dashboard: failed to delete token file %s", path)
+    if deleted == 0:
+        return {"error": "could not delete the stored token"}
     return {"ok": True, "email": email, "revoked": revoked, "deleted": True}
 
 

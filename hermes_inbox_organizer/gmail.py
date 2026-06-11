@@ -60,6 +60,11 @@ def parse_message(msg: dict, *, body_limit: int = 4000) -> dict:
     label->category mapping; both default to a benign empty value so existing
     callers (full-body parses without ``internalDate``/``labelIds``) are
     unaffected.
+
+    Bulk-mail list headers are surfaced for the marketing classifier as derived
+    values (``list_unsubscribe``/``one_click_unsubscribe`` booleans + a
+    normalized ``precedence``); metadata-format parses, which omit those
+    headers, default them benign.
     """
     payload = msg.get("payload") or {}
     headers = payload.get("headers") or []
@@ -79,6 +84,11 @@ def parse_message(msg: dict, *, body_limit: int = 4000) -> dict:
         "body": _extract_plain(payload)[:body_limit],
         "internal_date": internal_date,
         "label_ids": list(msg.get("labelIds") or []),
+        # Booleans/normalized tokens (never raw header text) so classifier
+        # prompts can cite these without echoing untrusted content.
+        "list_unsubscribe": bool(_header(headers, "list-unsubscribe")),
+        "one_click_unsubscribe": bool(_header(headers, "list-unsubscribe-post")),
+        "precedence": _header(headers, "precedence").strip().lower(),
     }
 
 

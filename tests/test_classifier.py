@@ -21,6 +21,39 @@ def test_pre_classify_noreply_else_none() -> None:
     assert pre_classify({"from": "alice@example.com"}) is None
 
 
+def test_pre_classify_one_click_unsubscribe_is_marketing() -> None:
+    # RFC 8058 one-click unsubscribe = bulk-sender fingerprint, decisive alone.
+    assert pre_classify({"from": "team@vendor.com", "one_click_unsubscribe": True}) == "Marketing"
+
+
+def test_pre_classify_list_unsubscribe_with_bulk_precedence_is_marketing() -> None:
+    for prec in ("bulk", "junk", "Bulk"):
+        parsed = {"from": "team@vendor.com", "list_unsubscribe": True, "precedence": prec}
+        assert pre_classify(parsed) == "Marketing"
+
+
+def test_pre_classify_bare_list_unsubscribe_defers_to_llm() -> None:
+    # GitHub notifications / mailing lists carry List-Unsubscribe on
+    # non-marketing mail — a bare header (or Precedence: list) must not hard-rule.
+    assert pre_classify({"from": "notifications@github.com", "list_unsubscribe": True}) is None
+    assert (
+        pre_classify(
+            {"from": "notifications@github.com", "list_unsubscribe": True, "precedence": "list"}
+        )
+        is None
+    )
+
+
+def test_pre_classify_bulk_marketing_beats_noreply() -> None:
+    # A no-reply marketing blast is Marketing, not a generic Notification.
+    assert pre_classify({"from": "no-reply@promo.com", "one_click_unsubscribe": True}) == "Marketing"
+
+
+def test_pre_classify_body_unsubscribe_text_never_hard_classifies() -> None:
+    # A human asking about unsubscribing is still LLM territory (To Respond).
+    assert pre_classify({"from": "alice@example.com", "body": "How do I unsubscribe users?"}) is None
+
+
 def test_classify_uses_pre_classifier_without_calling_llm() -> None:
     called: list[int] = []
 
@@ -65,6 +98,69 @@ def test_classify_llm_error_falls_back_to_fyi() -> None:
         raise RuntimeError("api down")
 
     assert classify({"from": "a@x.com", "subject": "x"}, llm_classify=boom) == "FYI"
+
+
+def test_classify_unsubscribe_eml_shape_is_marketing_without_llm() -> None:
+    # Regression for unsubscribe.eml (DataForSEO newsletter): one-click unsub +
+    # Precedence: bulk, with a "just reply to this email" body that baits LLMs
+    # into To Respond (and a Hermes draft). The header rule decides first.
+    def llm_must_not_run(system: str, user: str) -> dict:
+        raise AssertionError("LLM must not be called for decisive bulk headers")
+
+    parsed = {
+        "from": "DataForSEO Team <team@dataforseo.com>",
+        "subject": "You asked, we built: New updates to our API docs!",
+        "body": "Just reply directly to this email with a quick rating from 1 to 5. Unsubscribe here",
+        "list_unsubscribe": True,
+        "one_click_unsubscribe": True,
+        "precedence": "bulk",
+    }
+    assert classify(parsed, llm_classify=llm_must_not_run) == "Marketing"
+
+
+def test_classify_weak_unsubscribe_signal_hints_llm_outside_fence() -> None:
+    captured: dict = {}
+
+    def capture(system: str, user: str) -> dict:
+        captured["user"] = user
+        return {"category": "Marketing"}
+
+    classify(
+        {"from": "news@x.com", "subject": "Weekly digest", "body": "stuff", "list_unsubscribe": True},
+        llm_classify=capture,
+    )
+    user = captured["user"]
+    assert "Trusted signal" in user
+    assert user.index("</EMAIL_") < user.index("Trusted signal")  # hint sits outside the fence
+
+
+def test_classify_body_unsubscribe_text_hints_llm() -> None:
+    captured: dict = {}
+
+    def capture(system: str, user: str) -> dict:
+        captured["user"] = user
+        return {"category": "Marketing"}
+
+    classify(
+        {"from": "news@x.com", "subject": "Sale", "body": "Big sale!\n\nUnsubscribe here"},
+        llm_classify=capture,
+    )
+    assert "Trusted signal" in captured["user"]
+
+
+def test_classify_personal_mail_gets_no_unsubscribe_hint() -> None:
+    captured: dict = {}
+
+    def capture(system: str, user: str) -> dict:
+        captured["user"] = user
+        return {"category": "To Respond"}
+
+    out = classify(
+        {"from": "alice@x.com", "subject": "Question", "body": "Can you review the doc?"},
+        llm_classify=capture,
+    )
+    assert out == "To Respond"
+    assert "Trusted signal" not in captured["user"]
 
 
 def test_classify_fences_untrusted_body() -> None:

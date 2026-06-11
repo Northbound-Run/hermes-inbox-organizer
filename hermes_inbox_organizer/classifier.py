@@ -13,7 +13,7 @@ from typing import Callable
 
 from . import llm
 from .labels import CLASSIFIER_CATEGORIES, category_by_name
-from .pre_classifier import pre_classify
+from .pre_classifier import has_unsubscribe_signal, pre_classify
 
 LlmClassify = Callable[[str, str], dict]
 
@@ -69,10 +69,26 @@ def _fenced(parsed: dict) -> str:
         f"Subject: {parsed.get('subject', '')}\n\n"
         f"{(parsed.get('body') or parsed.get('snippet') or '')[:4000]}"
     )
-    return (
+    out = (
         "Classify the email between the fences.\n"
         f"<EMAIL_{tok}>\n{inner}\n</EMAIL_{tok}>"
     )
+    # Weak bulk signals (a bare List-Unsubscribe header, or unsubscribe text in
+    # the body) don't hard-classify — pre_classify handles the decisive header
+    # combos — but the LLM should weigh them. Stated OUTSIDE the fence as a
+    # derived boolean, never echoed header/body text, so it adds no injection
+    # surface; the worst an email gains by faking it is burying itself in
+    # Marketing.
+    if has_unsubscribe_signal(parsed):
+        out += (
+            "\nTrusted signal (computed by the system, not taken from the email): "
+            "an unsubscribe header or link is present, so this is very likely bulk "
+            "mail — usually Marketing (newsletter, promo, cold outreach), sometimes "
+            'an automated Notification. Boilerplate like "just reply to this email" '
+            "does not make bulk mail To Respond; reserve To Respond for a real "
+            "person individually addressing the recipient."
+        )
+    return out
 
 
 def classify(parsed: dict, *, llm_classify: LlmClassify = llm.classify_json) -> str:

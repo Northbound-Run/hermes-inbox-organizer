@@ -54,6 +54,27 @@ def test_parse_message_decodes_headers_and_body() -> None:
     assert parsed["body"] == "Let's meet Tuesday."
 
 
+def test_parse_message_surfaces_bulk_mail_signals() -> None:
+    # Header shape from unsubscribe.eml (a real ESP newsletter).
+    msg = _msg("m1", "team@dataforseo.com", "New updates!", "... Unsubscribe here")
+    msg["payload"]["headers"] += [
+        {"name": "List-Unsubscribe", "value": "<mailto:u@x.com>, <https://x.com/u>"},
+        {"name": "List-Unsubscribe-Post", "value": "List-Unsubscribe=One-Click"},
+        {"name": "Precedence", "value": "Bulk"},
+    ]
+    parsed = parse_message(msg)
+    assert parsed["list_unsubscribe"] is True
+    assert parsed["one_click_unsubscribe"] is True
+    assert parsed["precedence"] == "bulk"  # normalized
+
+
+def test_parse_message_bulk_mail_signals_default_benign() -> None:
+    parsed = parse_message(_msg("m1", "alice@x.com", "Lunch?", "Tuesday?"))
+    assert parsed["list_unsubscribe"] is False
+    assert parsed["one_click_unsubscribe"] is False
+    assert parsed["precedence"] == ""
+
+
 def test_get_thread_returns_parsed_messages() -> None:
     thread = {"messages": [_msg("m1", "a@x.com", "Hi", "first"), _msg("m2", "b@x.com", "Re: Hi", "second")]}
     handler = make_inbox_get_thread_handler(lambda aid: FakeReader(thread=thread))

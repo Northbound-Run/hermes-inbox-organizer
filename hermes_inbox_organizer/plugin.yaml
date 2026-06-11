@@ -5,25 +5,45 @@ author: Matthew Hall
 license: MIT
 kind: standalone
 
-# Tools surfaced to the agent.
+# Tools surfaced to the agent (several are owner-gated — see the README).
 provides_tools:
   - inbox_create_draft
+  - inbox_list_emails
+  - inbox_get_email
+  - inbox_get_thread
+  - inbox_list_accounts
+  - inbox_unread_rollup
+  - inbox_get_sender_profile
+  - inbox_save_sender_profile
+  - inbox_draft_feedback_status
+  - inbox_connect_account
+  - inbox_complete_connection
+  - inbox_disconnect_account
+  - inbox_backfill_profiles
+  - inbox_forget_lesson
+  - inbox_clear_learned_notes
 
 # Hooks the plugin registers (validated against hermes_cli/plugins.py VALID_HOOKS).
 provides_hooks:
   - pre_llm_call
 
-# Live build env (kept out of register() — seams keep it credential-free for tests/CI).
+# Env the plugin actually reads (config.py / llm.py). NOTE: requires_env is
+# *advisory* in Hermes — it drives `hermes plugins install` prompts and the
+# dashboard's missing-env badge, but does NOT gate loading. The rest of the
+# configuration (Google OAuth client, Pub/Sub topic+subscription, AES key) is
+# installed as FILES in the read-only config mount, not as env vars — see
+# docs/setup.md.
 requires_env:
-  - name: GOOGLE_PROJECT_ID
-    description: "GCP project hosting the Gmail Pub/Sub topic + subscription."
-  - name: PUBSUB_SUBSCRIPTION_ID
-    description: "Pub/Sub subscription consumed via streaming pull (no webhook)."
-  - name: HERMES_URL
-    description: "Base URL of the local Hermes OpenAI-compatible endpoint (draft trigger)."
-    url: "https://hermes-agent.nousresearch.com/"
-  - name: HERMES_MODEL
-    description: "Instance/model name the endpoint answers to."
+  - name: OPENROUTER_API_KEY
+    description: "OpenRouter API key for the local classifier LLM (most Hermes setups already have one)."
+    url: "https://openrouter.ai/keys"
+    secret: true
+
+# Only needed for Hermes-drafted replies (the wake → draft trigger). Triage and
+# labeling run fine without these.
 optional_env:
-  HERMES_API_KEY:
-    description: "Bearer token for the Hermes endpoint, if the deployment requires one."
+  - name: HERMES_API_URL
+    description: "Base URL of the local Hermes OpenAI-compatible endpoint; without it, drafting is skipped (classification/labeling still run)."
+  - name: API_SERVER_KEY
+    description: "Bearer token for the Hermes wake endpoint, if the deployment requires one."
+    secret: true

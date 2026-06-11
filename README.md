@@ -54,73 +54,98 @@ loads with the agent.
 ## Install
 
 This is a **pip / entry-point Hermes plugin** — it ships the
-`hermes_agent.plugins` entry point and Hermes loads it in-process. It is **not**
-installed with `hermes plugins install <repo>`: that command git-clones a
-*directory* plugin and never installs Python dependencies, which this plugin
-needs (Gmail, Pub/Sub, OpenRouter). Use `pip`. For the discovery/enable model see
-the [Hermes plugin docs](https://hermes-agent.nousresearch.com/docs/user-guide/features/plugins).
+`hermes_agent.plugins` entry point and your Hermes agent loads it in-process. It
+is **not** installed with `hermes plugins install <repo>`: that command
+git-clones a *directory* plugin and never installs Python dependencies, which
+this plugin needs (Gmail, Pub/Sub, OpenRouter). Use `pip`. For the
+discovery/enable model see the
+[Hermes plugin docs](https://hermes-agent.nousresearch.com/docs/user-guide/features/plugins).
 
-**Prerequisites**
+You need a **Hermes** deployment you control. The three steps below are: set up
+**Google Cloud**, install + enable the **plugin**, then drop in its **config**.
 
-- A **Hermes** deployment you control (the triage daemon runs in-process).
-- A **Google Cloud** project (Gmail + Pub/Sub APIs, an OAuth client, a topic +
-  pull subscription) and an **OpenRouter** API key. Full walkthrough:
-  [docs/setup.md](docs/setup.md) and [docs/google-bootstrap.md](docs/google-bootstrap.md).
+### 1. Google Cloud
 
-### Option A — bake into your Hermes image (recommended)
+The plugin watches Gmail over Pub/Sub via an **outbound streaming pull** (no
+webhook, no public endpoint), so it needs a Google Cloud project with the Gmail +
+Pub/Sub APIs, an OAuth client, and a topic + pull subscription.
 
-Hermes deployments are usually containers, and the daemon should start at boot,
-so the production path is to install the package into your agent image. In your
-Hermes `Dockerfile` (the venv is where the `hermes` CLI lives):
+1. **Project** — [console.cloud.google.com](https://console.cloud.google.com/) →
+   project selector → **New Project** (e.g. `hermes-inbox`).
+2. **Enable APIs** — APIs & Services → Library → enable **Gmail API**
+   (`gmail.googleapis.com`) and **Cloud Pub/Sub API** (`pubsub.googleapis.com`).
+3. **OAuth consent screen** — APIs & Services → OAuth consent screen →
+   **External**. Add scopes `gmail.modify`, `gmail.send`, `userinfo.email`,
+   `userinfo.profile`; add your Gmail as a **Test User**; then **Publish App**
+   (Production audience) to avoid the 7-day refresh-token expiry
+   ([docs/oauth-modes.md](docs/oauth-modes.md)).
+4. **OAuth client** — Credentials → Create Credentials → OAuth client ID →
+   **Web application**. For the **Authorized redirect URI** use a static page
+   that just displays the code for you to paste back — host `oauth-callback/`
+   yourself or reuse `https://inbox-organizer.northbound.run/` (it holds no
+   secrets; the OAuth client itself must still be **your own**). Save the
+   client id/secret for step 3.
+5. **Pub/Sub** — Pub/Sub → Topics → **Create Topic** (e.g. `gmail-notifications`);
+   on that topic, **Create Subscription** with delivery type **Pull** (e.g.
+   `gmail-inbox-organizer-pull`).
+6. **Let Gmail publish** — on the topic → Permissions → **Add Principal**
+   `gmail-api-push@system.gserviceaccount.com`, role **Pub/Sub Publisher**.
+7. **Subscriber key** — IAM & Admin → Service Accounts → create one (e.g.
+   `hermes-inbox-pubsub`), grant **`roles/pubsub.subscriber`** *on the
+   subscription* (not project-wide), and download a JSON key.
 
-```dockerfile
-RUN /opt/hermes/.venv/bin/python -m pip install --no-cache-dir "hermes-inbox-organizer[live]"
-# from source instead of PyPI:
-#   ... "hermes-inbox-organizer[live] @ git+https://github.com/Northbound-Run/hermes-inbox-organizer"
-```
+(Screens and detail: [docs/google-bootstrap.md](docs/google-bootstrap.md).)
 
-`[live]` pulls the Gmail/Pub/Sub/OpenRouter deps. Then **enable** it in the
-agent's `config.yaml` (pip plugins are opt-in):
+### 2. Install the plugin
 
-```yaml
-plugins:
-  enabled:
-    - inbox_organizer
-```
-
-Finally: install the secrets into the read-only config mount, set
-`OPENROUTER_API_KEY` in the Hermes environment, and install the `gateway:startup`
-boot hook so the daemon starts at boot (otherwise it waits for the first agent
-turn). The [`hermes-template`](https://github.com/Northbound-Run/hermes-template)
-stack wires all of this up — the step-by-step is in **[docs/setup.md](docs/setup.md)**.
-
-### Option B — pip into an existing Hermes
-
-For a Hermes you can `pip install` into directly, install into the **same
-environment** as the `hermes` CLI, then enable and restart:
+Install into the **same Python environment** as your `hermes` CLI:
 
 ```sh
-pip install "hermes-inbox-organizer[live]"        # or: "...[live] @ git+https://github.com/Northbound-Run/hermes-inbox-organizer"
-hermes plugins enable inbox_organizer             # or add `inbox_organizer` to plugins.enabled in ~/.hermes/config.yaml
+pip install "hermes-inbox-organizer[live]"
+# or from source: pip install "hermes-inbox-organizer[live] @ git+https://github.com/Northbound-Run/hermes-inbox-organizer"
 ```
 
-Then configure it for a non-container host:
+`[live]` pulls the Gmail/Pub/Sub/OpenRouter deps. Hermes auto-discovers the
+plugin via its entry point; **enable** it (pip plugins are opt-in):
 
-- `OPENROUTER_API_KEY` in the environment (the classifier LLM).
-- Point `INBOX_CONFIG_DIR` (read-only secrets) and `INBOX_DATA_DIR` (writable DB
-  + encrypted tokens) at real paths — they default to `/opt/data/...` for the
-  container. Drop the OAuth client, Pub/Sub config, service-account key, and AES
-  key into `INBOX_CONFIG_DIR` per [docs/setup.md](docs/setup.md).
-- For start-at-boot, copy the hook from
-  [`deploy/hooks/inbox-organizer-boot/`](deploy/hooks/inbox-organizer-boot) into
-  `~/.hermes/hooks/inbox-organizer-boot/`; without it the daemon starts on the
-  first agent turn.
+```sh
+hermes plugins enable inbox_organizer    # or add `inbox_organizer` to plugins.enabled in ~/.hermes/config.yaml
+```
 
-### Connect a Gmail account
+### 3. Config + secrets
 
-There's no web wizard — you connect by **chatting with Hermes**: *"Connect a
-Gmail account."* The agent returns a Google consent link; approve it, paste the
-code back, and the account is hot-added (owner-gated only).
+The plugin reads its secrets as **files** from a config dir
+(`INBOX_CONFIG_DIR`, default `/opt/data/config`) and writes its SQLite DB +
+encrypted tokens to a data dir (`INBOX_DATA_DIR`, default
+`/opt/data/inbox-organizer`). Point both env vars at real paths if those
+defaults don't fit your host, then install these files into `INBOX_CONFIG_DIR`:
+
+| File | Contents |
+|---|---|
+| `inbox-oauth-client.json` | `{ "client_id", "client_secret", "redirect_uri", "owner_matrix_ids": ["@you:your-homeserver"] }` (from step 1.4) |
+| `inbox-pubsub.json` | `{ "project", "topic": "projects/<id>/topics/<topic>", "subscription" }` (from step 1.5) |
+| `inbox-pubsub-sa.json` | the `pubsub.subscriber` service-account key (step 1.7) |
+| `inbox-encryption-key` | 32 hex bytes — `openssl rand -hex 32` (AES-GCM for tokens at rest) |
+
+And in the Hermes environment:
+
+- `OPENROUTER_API_KEY` — the classifier LLM
+  ([openrouter.ai/keys](https://openrouter.ai/keys)); most Hermes setups already
+  have one.
+- `HERMES_API_URL` *(optional)* — the Hermes OpenAI-compatible endpoint, needed
+  only for the drafted replies; triage + labeling run without it.
+
+Restart Hermes. To start the daemon at boot (instead of on the first agent
+turn), copy the `gateway:startup` hook from
+[`deploy/hooks/inbox-organizer-boot/`](deploy/hooks/inbox-organizer-boot) into
+`~/.hermes/hooks/inbox-organizer-boot/`.
+
+### 4. Connect a Gmail account
+
+There's no web wizard — connect by **chatting with Hermes**: *"Connect a Gmail
+account."* The agent returns a Google consent link; approve it, paste the code
+from the callback page back, and the account is hot-added (owner-gated only).
+Repeat for additional mailboxes.
 
 ### Verify
 
@@ -129,9 +154,13 @@ hermes plugins list                          # inbox_organizer → enabled
 HERMES_PLUGINS_DEBUG=1 hermes plugins list   # verbose discovery if it doesn't show up
 ```
 
-In a running session, `/plugins` lists it as loaded. Then ask the agent to run
-`inbox_list_accounts`, and send yourself a test email — it should get a numbered
+In a running session, `/plugins` lists it as loaded. Ask the agent to run
+`inbox_list_accounts`, then send yourself a test email — it should get a numbered
 label within seconds (push) or a few minutes (the polling reconciler).
+
+> **Deploying into a baked container image** (the daemon up at boot, secrets in a
+> read-only mount)? That's how this repo's own stack runs — see
+> [docs/setup.md](docs/setup.md) for the Dockerfile + entrypoint wiring.
 
 ## Layout
 

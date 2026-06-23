@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Northbound-Run/hermes-inbox-organizer/security/advisories/new
+    about: Report security issues privately — please don't open a public issue.
+  - name: Setup & usage docs
+    url: https://github.com/Northbound-Run/hermes-inbox-organizer/tree/main/docs
+    about: Google Cloud bootstrap, OAuth, sync modes, dashboard, and security notes.

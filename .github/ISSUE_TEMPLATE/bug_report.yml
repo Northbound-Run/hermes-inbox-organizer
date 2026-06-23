@@ -1,0 +1,46 @@
+name: Bug report
+description: Something isn't working as documented
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. For security issues, **don't use this form** — see
+        [SECURITY.md](https://github.com/Northbound-Run/hermes-inbox-organizer/blob/main/SECURITY.md).
+        Never paste OAuth tokens, secrets, or full email contents.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Plugin version
+      placeholder: "0.1.0  (pip show hermes-inbox-organizer)"
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Python / Hermes / OS
+      placeholder: "Python 3.13, Hermes <ver>, Ubuntu 24.04 (in container)"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Redact addresses, tokens, and message bodies.
+      render: shell

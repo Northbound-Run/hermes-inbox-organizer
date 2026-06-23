@@ -37,10 +37,8 @@ live = [
   "google-auth-oauthlib>=1.0",  # InstalledAppFlow for `connect`
   "openai>=1.0",  # OpenRouter classifier client
 ]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
 
-# NOTE(publish): confirm the final GitHub owner/org before the first PyPI upload
-# (assumed Northbound-Run to match the hermes-template repo).
 [project.urls]
 Homepage = "https://github.com/Northbound-Run/hermes-inbox-organizer"
 Repository = "https://github.com/Northbound-Run/hermes-inbox-organizer"
@@ -55,6 +53,14 @@ inbox_organizer = "hermes_inbox_organizer"
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint.per-file-ignores]
+# Tests deliberately use compact one-line statements (E702) and short throwaway
+# names like `l` (E741) for table-style cases; the package itself stays clean.
+"tests/*" = ["E702", "E741"]
 
 [build-system]
 # setuptools>=77 for PEP 639 license metadata (`license = "MIT"` SPDX expression

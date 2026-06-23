@@ -20,7 +20,7 @@ import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 from .token_store import AccountToken
 

@@ -6,7 +6,6 @@ Covers:
 - reset_config() flushes the cache so the next get_config() re-reads the env.
 """
 
-import os
 
 import pytest
 

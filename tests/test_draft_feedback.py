@@ -14,7 +14,7 @@ import contextlib
 import json
 from types import SimpleNamespace
 
-from hermes_inbox_organizer import db, draft_learn
+from hermes_inbox_organizer import db
 from hermes_inbox_organizer.modules import SentEvent
 from hermes_inbox_organizer.modules.draft_feedback import DraftFeedbackModule
 

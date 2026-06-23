@@ -1,6 +1,13 @@
 # hermes-inbox-organizer
 
-Autonomous Gmail triage as an in-process **Hermes plugin**.
+Autonomous Gmail triage as an in-process **Hermes plugin** — it sorts, labels,
+and archives your mail and drafts replies in your voice, self-hosted, with no
+third-party SaaS in the path of your inbox.
+
+[![CI](https://github.com/Northbound-Run/hermes-inbox-organizer/actions/workflows/ci.yml/badge.svg)](https://github.com/Northbound-Run/hermes-inbox-organizer/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/hermes-inbox-organizer)](https://pypi.org/project/hermes-inbox-organizer/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 ---
 

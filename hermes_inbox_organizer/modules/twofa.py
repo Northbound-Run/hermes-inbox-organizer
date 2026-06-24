@@ -28,7 +28,8 @@ from __future__ import annotations
 import contextlib
 import logging
 import re
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 from .. import db
 from .base import InboundEvent, Module
@@ -64,7 +65,7 @@ _CODE_PATTERNS = (
 _ANGLE_ADDR_RE = re.compile(r"<([^>]+)>")
 
 
-def detect_code(parsed: dict) -> Optional[str]:
+def detect_code(parsed: dict) -> str | None:
     """Return the login/verification code in this email, or None.
 
     Precision-first: requires the code to sit next to a code cue (or be a
@@ -105,8 +106,8 @@ class TwoFactorModule(Module):
         *,
         notifier: Any,
         enabled: bool = True,
-        sender_allowlist: Optional[frozenset] = None,
-        db_connect: Optional[Callable[[], Any]] = None,
+        sender_allowlist: frozenset | None = None,
+        db_connect: Callable[[], Any] | None = None,
     ) -> None:
         self._notifier = notifier
         self._enabled = enabled

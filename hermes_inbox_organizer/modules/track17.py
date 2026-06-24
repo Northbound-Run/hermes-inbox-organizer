@@ -24,7 +24,7 @@ import json
 import logging
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Optional, Protocol
+from typing import Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +49,9 @@ TERMINAL_STAGES = frozenset({STAGE_DELIVERED, STAGE_EXCEPTION, STAGE_EXPIRED})
 @dataclass(frozen=True)
 class TrackStatus:
     number: str
-    stage: Optional[str]  # a normalized stage, or None when not yet known / not found
+    stage: str | None  # a normalized stage, or None when not yet known / not found
     sub_status: str = ""
-    carrier: Optional[int] = None
+    carrier: int | None = None
 
 
 @dataclass(frozen=True)
@@ -125,7 +125,7 @@ class HttpTrack17Client:
             headers={"Content-Type": "application/json", "17token": self._key},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=self._timeout) as resp:  # noqa: S310 - fixed host
+        with urllib.request.urlopen(req, timeout=self._timeout) as resp:
             return json.loads(resp.read().decode() or "{}")
 
     def register(self, numbers: list) -> RegisterResult:

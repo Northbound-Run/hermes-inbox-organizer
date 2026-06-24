@@ -8,13 +8,18 @@ agent as a plugin. Issues and pull requests are welcome.
 
 ```sh
 uv venv && uv pip install -e ".[dev]"
-.venv/bin/python -m pytest -q     # 419 tests, no Hermes or live Google needed
-uvx ruff check                    # lint
+.venv/bin/python -m pytest -q     # the suite runs offline — no Hermes or live Google needed
+ruff check .                      # lint
+mypy                              # type-check
 ```
 
 The unit tests run entirely offline — network, Google, and agent calls sit behind
 seams that the tests stub. **Preserve those seams**: a change that makes the
 suite require live credentials or a running Hermes won't be accepted.
+
+This plugin follows the shared [Hermes Plugin Standard](HERMES_PLUGIN_STANDARD.md)
+— packaging, tooling, CI, release, and security conventions used across our Hermes
+plugins. Skim it before a substantial change.
 
 ## Conventions
 
@@ -36,7 +41,7 @@ These mirror `CLAUDE.md`, which is the source of truth:
 
 1. Fork and branch from `main`.
 2. Keep changes focused; add or update tests for behavior changes.
-3. Make sure `pytest` and `ruff check` both pass.
+3. Make sure `pytest`, `ruff check .`, and `mypy` all pass.
 4. Use [Conventional Commit](https://www.conventionalcommits.org/) subjects to
    match the history, e.g. `feat(classifier): …`, `fix(dashboard): …`,
    `docs(readme): …`.

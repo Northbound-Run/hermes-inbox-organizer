@@ -19,10 +19,11 @@ users/auth table (the agent is owner-gated) and labels stay code constants.
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Optional, TypedDict, cast
+from typing import Any, TypedDict, cast
 
 from .config import get_config
 
@@ -38,11 +39,11 @@ from .config import get_config
 class DraftRequestRow(TypedDict):
     account: str
     thread_id: str
-    gmail_draft_id: Optional[str]
-    from_addr: Optional[str]
-    subject: Optional[str]
+    gmail_draft_id: str | None
+    from_addr: str | None
+    subject: str | None
     attempts: int
-    last_attempt_ms: Optional[int]
+    last_attempt_ms: int | None
     created_at_ms: int
 
 
@@ -57,32 +58,32 @@ class ThreadStateRow(TypedDict):
 class SenderProfileRow(TypedDict):
     account: str
     sender_email: str
-    display_name: Optional[str]
-    relationship: Optional[str]
-    voice_notes: Optional[str]
-    tone_hints: Optional[str]
-    learned_notes: Optional[str]
-    learned_updated_ms: Optional[int]
+    display_name: str | None
+    relationship: str | None
+    voice_notes: str | None
+    tone_hints: str | None
+    learned_notes: str | None
+    learned_updated_ms: int | None
     draft_count: int
-    last_drafted_at_ms: Optional[int]
-    source: Optional[str]
+    last_drafted_at_ms: int | None
+    source: str | None
     updated_at_ms: int
 
 
 class DraftOutcomeRow(TypedDict):
     account: str
     thread_id: str
-    sender_email: Optional[str]
-    gmail_draft_id: Optional[str]
-    draft_body: Optional[str]
-    draft_created_ms: Optional[int]
-    sent_message_id: Optional[str]
-    sent_body: Optional[str]
-    sent_at_ms: Optional[int]
+    sender_email: str | None
+    gmail_draft_id: str | None
+    draft_body: str | None
+    draft_created_ms: int | None
+    sent_message_id: str | None
+    sent_body: str | None
+    sent_at_ms: int | None
     outcome: str
-    similarity: Optional[int]
+    similarity: int | None
     learned: int
-    learned_at_ms: Optional[int]
+    learned_at_ms: int | None
     updated_at_ms: int
 
 
@@ -102,10 +103,10 @@ class DraftLessonRow(TypedDict):
 class TrackedPackageRow(TypedDict):
     account: str
     tracking_number: str
-    carrier: Optional[int]
+    carrier: int | None
     registered: int
-    last_stage: Optional[str]
-    last_notified_stage: Optional[str]
+    last_stage: str | None
+    last_notified_stage: str | None
     terminal: int
     created_at_ms: int
     updated_at_ms: int
@@ -116,11 +117,11 @@ class LearnedNoteSummaryRow(TypedDict):
     # LENGTH of the learned note, never its text (avoids echoing fenced content).
     account: str
     sender_email: str
-    note_chars: Optional[int]
-    updated_ms: Optional[int]
+    note_chars: int | None
+    updated_ms: int | None
 
 
-def _as_dict(row: Optional[sqlite3.Row]) -> Optional[dict[str, Any]]:
+def _as_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     """sqlite3.Row -> plain dict (or None), the single-row accessor boundary."""
     return dict(row) if row is not None else None
 
@@ -317,10 +318,8 @@ def _apply_wal(conn: sqlite3.Connection) -> None:
     # WAL lets the daemon read while a writer holds the lock. On a WAL-incompatible
     # filesystem (NFS/SMB/FUSE) SQLite silently keeps the existing journal mode —
     # correctness is unaffected, only write concurrency degrades, so we don't fail.
-    try:
+    with contextlib.suppress(sqlite3.OperationalError):
         conn.execute("PRAGMA journal_mode=WAL")
-    except sqlite3.OperationalError:
-        pass
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -355,7 +354,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 
 
-def connect(db_path: Optional[Path | str] = None) -> sqlite3.Connection:
+def connect(db_path: Path | str | None = None) -> sqlite3.Connection:
     """Open (and on first touch, initialize) the plugin DB.
 
     The first connection to a given path runs the schema + migrations; later
@@ -381,7 +380,7 @@ def connect(db_path: Optional[Path | str] = None) -> sqlite3.Connection:
 
 # ── Accounts: history cursor (replaces cursor-<email>.txt) ──────────────────────
 
-def get_cursor(conn: sqlite3.Connection, account: str) -> Optional[str]:
+def get_cursor(conn: sqlite3.Connection, account: str) -> str | None:
     row = conn.execute(
         "SELECT history_cursor FROM accounts WHERE account = ?", (account,)
     ).fetchone()
@@ -398,7 +397,7 @@ def set_cursor(conn: sqlite3.Connection, account: str, history_id: str) -> None:
     )
 
 
-def get_account_updated_ms(conn: sqlite3.Connection, account: str) -> Optional[int]:
+def get_account_updated_ms(conn: sqlite3.Connection, account: str) -> int | None:
     """``accounts.updated_at_ms`` for an account (None if unknown).
 
     Bumped by :func:`set_cursor` after every successful drain, so it doubles as a
@@ -439,13 +438,13 @@ def set_draft_id(conn: sqlite3.Connection, account: str, thread_id: str, gmail_d
 
 def get_draft_request(
     conn: sqlite3.Connection, account: str, thread_id: str
-) -> Optional[DraftRequestRow]:
+) -> DraftRequestRow | None:
     """The draft_requests row for a thread, or None."""
     row = conn.execute(
         "SELECT * FROM draft_requests WHERE account = ? AND thread_id = ?",
         (account, thread_id),
     ).fetchone()
-    return cast("Optional[DraftRequestRow]", _as_dict(row))
+    return cast("DraftRequestRow | None", _as_dict(row))
 
 
 def claim_draft(
@@ -536,9 +535,9 @@ def record_classified_message(
     subject: str = "",
     confidence: int = 0,
     source: str = "llm",
-    llm_input_tokens: Optional[int] = None,
-    llm_output_tokens: Optional[int] = None,
-    llm_cost_usd_micros: Optional[int] = None,
+    llm_input_tokens: int | None = None,
+    llm_output_tokens: int | None = None,
+    llm_cost_usd_micros: int | None = None,
 ) -> None:
     """Upsert a message's classification (idempotent on re-processing)."""
     conn.execute(
@@ -585,25 +584,25 @@ def upsert_thread_state(
 
 def get_thread_state(
     conn: sqlite3.Connection, account: str, thread_id: str
-) -> Optional[ThreadStateRow]:
+) -> ThreadStateRow | None:
     row = conn.execute(
         "SELECT * FROM thread_state WHERE account = ? AND thread_id = ?",
         (account, thread_id),
     ).fetchone()
-    return cast("Optional[ThreadStateRow]", _as_dict(row))
+    return cast("ThreadStateRow | None", _as_dict(row))
 
 
 # ── Sender profiles (voice/relationship for the drafting brief) ───────────────────
 
 def get_sender_profile(
     conn: sqlite3.Connection, account: str, sender_email: str
-) -> Optional[SenderProfileRow]:
+) -> SenderProfileRow | None:
     """The profile row for a (normalized) sender, or None."""
     row = conn.execute(
         "SELECT * FROM sender_profiles WHERE account = ? AND sender_email = ?",
         (account, sender_email),
     ).fetchone()
-    return cast("Optional[SenderProfileRow]", _as_dict(row))
+    return cast("SenderProfileRow | None", _as_dict(row))
 
 
 def upsert_sender_profile(
@@ -611,11 +610,11 @@ def upsert_sender_profile(
     *,
     account: str,
     sender_email: str,
-    display_name: Optional[str] = None,
-    relationship: Optional[str] = None,
-    voice_notes: Optional[str] = None,
-    tone_hints: Optional[str] = None,
-    source: Optional[str] = None,
+    display_name: str | None = None,
+    relationship: str | None = None,
+    voice_notes: str | None = None,
+    tone_hints: str | None = None,
+    source: str | None = None,
 ) -> None:
     """Insert or update a sender profile. ``COALESCE`` keeps existing non-NULL fields
     when a partial update passes None, so a later refinement never clobbers prior data."""
@@ -679,7 +678,7 @@ def clear_learned_notes(conn: sqlite3.Connection, account: str, sender_email: st
 
 
 def learned_note_summaries(
-    conn: sqlite3.Connection, account: Optional[str] = None, *, limit: int = 100
+    conn: sqlite3.Connection, account: str | None = None, *, limit: int = 100
 ) -> list[LearnedNoteSummaryRow]:
     """Senders that have a learned note — the note's LENGTH only, never its text.
 
@@ -749,7 +748,7 @@ def record_draft_outcome_sent(
     sender_email: str,
     sent_message_id: str,
     sent_body: str,
-    similarity: Optional[int],
+    similarity: int | None,
     outcome: str,
 ) -> None:
     """Write the sent side + outcome (upsert; supports ``draft_body IS NULL`` capture-all rows).
@@ -779,13 +778,13 @@ def record_draft_outcome_sent(
 
 def get_draft_outcome(
     conn: sqlite3.Connection, account: str, thread_id: str
-) -> Optional[DraftOutcomeRow]:
+) -> DraftOutcomeRow | None:
     """The draft_outcomes row for a thread, or None."""
     row = conn.execute(
         "SELECT * FROM draft_outcomes WHERE account = ? AND thread_id = ?",
         (account, thread_id),
     ).fetchone()
-    return cast("Optional[DraftOutcomeRow]", _as_dict(row))
+    return cast("DraftOutcomeRow | None", _as_dict(row))
 
 
 def unlearned_outcomes(conn: sqlite3.Connection, *, limit: int) -> list[DraftOutcomeRow]:
@@ -873,7 +872,7 @@ def count_outcomes_by_sender(
 
 
 def outcome_histogram(
-    conn: sqlite3.Connection, account: Optional[str] = None
+    conn: sqlite3.Connection, account: str | None = None
 ) -> dict[str, int]:
     """Outcome counts ``{outcome: n}`` for one account, or (``account=None``) all accounts."""
     sql = "SELECT outcome, count(*) AS n FROM draft_outcomes"
@@ -1015,7 +1014,7 @@ def was_notified(conn: sqlite3.Connection, module: str, account: str, dedup_key:
 # ── Tracked packages (shipping module) ───────────────────────────────────────
 
 def add_tracked_package(
-    conn: sqlite3.Connection, account: str, tracking_number: str, carrier: Optional[int] = None
+    conn: sqlite3.Connection, account: str, tracking_number: str, carrier: int | None = None
 ) -> bool:
     """Insert a newly-detected parcel; True iff new (repeat emails are no-ops)."""
     cur = conn.execute(
@@ -1028,7 +1027,7 @@ def add_tracked_package(
 
 
 def mark_package_registered(
-    conn: sqlite3.Connection, account: str, tracking_number: str, carrier: Optional[int] = None
+    conn: sqlite3.Connection, account: str, tracking_number: str, carrier: int | None = None
 ) -> None:
     """Flag a parcel as accepted by 17track (and record the resolved carrier)."""
     conn.execute(
@@ -1086,7 +1085,7 @@ def set_package_notified_stage(
 
 
 def list_tracked_packages(
-    conn: sqlite3.Connection, account: Optional[str] = None, *, include_terminal: bool = False
+    conn: sqlite3.Connection, account: str | None = None, *, include_terminal: bool = False
 ) -> list[TrackedPackageRow]:
     """Tracked parcels for the on-demand tool (optionally scoped / incl. delivered)."""
     sql = "SELECT * FROM tracked_packages"
@@ -1114,7 +1113,7 @@ def create_oauth_pending(conn: sqlite3.Connection, *, state: str, verifier: str)
 
 def take_oauth_pending(
     conn: sqlite3.Connection, state: str, *, ttl_ms: int, now_ms: int
-) -> Optional[str]:
+) -> str | None:
     """Consume + return the PKCE verifier for ``state`` (single-use), else None.
 
     Always deletes the row (one shot), and returns None when it is missing or older

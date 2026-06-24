@@ -19,7 +19,8 @@ import json
 import re
 import secrets
 import time
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 from . import llm
 from .classifier import classify as _llm_classify_email
@@ -48,7 +49,7 @@ _UNIT_SECONDS = {"h": 3600, "d": 86400, "w": 604800}
 
 # Seam types.
 LlmClassify = Callable[[str, str], dict]
-Classify = Callable[[dict], Optional[str]]  # parsed -> bare category | None
+Classify = Callable[[dict], str | None]  # parsed -> bare category | None
 IsAuthError = Callable[[Exception], bool]
 
 # Emails whose token failed an auth check during a rollup. ``build_rollup`` adds
@@ -97,7 +98,7 @@ def _id_to_category(reader: GmailReader) -> dict[str, str]:
     return out
 
 
-def classify_or_none(parsed: dict, *, llm_classify: LlmClassify = llm.classify_json) -> Optional[str]:
+def classify_or_none(parsed: dict, *, llm_classify: LlmClassify = llm.classify_json) -> str | None:
     """Classify an unlabelled message, returning ``None`` on *any* failure.
 
     Unlike ``classifier.classify`` (which returns a safe "FYI" on failure — fine
@@ -118,7 +119,7 @@ def classify_or_none(parsed: dict, *, llm_classify: LlmClassify = llm.classify_j
 
 def _category_for(
     parsed: dict, id_to_cat: dict[str, str], *, classify: Classify
-) -> tuple[Optional[str], str]:
+) -> tuple[str | None, str]:
     """(category, source) for a message: label-first, else the injected classifier.
 
     Label path: a meaningful applied label -> ``(cat, "label")``; a noise label
@@ -212,7 +213,7 @@ def _rollup_one_account(
     threads: dict[str, dict] = {}
     scanned = 0
     classify_errors = 0
-    page_token: Optional[str] = None
+    page_token: str | None = None
     remaining = True  # are there more messages we haven't looked at?
     id_to_cat = _id_to_category(reader)
 
@@ -322,7 +323,7 @@ def build_rollup(
     *,
     period: Any = "24h",
     max_results: int = _DEFAULT_RESULTS,
-    now: Optional[float] = None,
+    now: float | None = None,
     classify: Classify,
     is_auth_error: IsAuthError,
 ) -> dict:
@@ -445,7 +446,7 @@ INBOX_UNREAD_ROLLUP_SCHEMA: dict[str, Any] = {
 # {"accounts": {email: reader}, "errors": [account-summary dicts]} so the
 # resolver can surface explicit "not connected: <id>" (no sole-account
 # fallback). Either shape is accepted.
-AccountResolver = Callable[[Optional[str]], dict]
+AccountResolver = Callable[[str | None], dict]
 
 
 def make_inbox_unread_rollup_handler(
@@ -453,7 +454,7 @@ def make_inbox_unread_rollup_handler(
     *,
     classify: Classify,
     is_auth_error: IsAuthError,
-    now_fn: Optional[Callable[[], float]] = None,
+    now_fn: Callable[[], float] | None = None,
 ):
     """Build the ``inbox_unread_rollup`` handler.
 

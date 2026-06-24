@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Callable, Optional, Protocol
+from collections.abc import Callable
+from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -84,11 +85,11 @@ INBOX_CREATE_DRAFT_SCHEMA: dict[str, Any] = {
 
 # Seam: account_id -> writer (live GmailDraftWriter, or a LoggingDraftWriter
 # fallback when no account is connected). None => not connected.
-ResolveWriter = Callable[[str], Optional[GmailDraftWriter]]
+ResolveWriter = Callable[[str], GmailDraftWriter | None]
 # Seams that close the draft ledger loop (both optional; default no-op so existing
 # call sites are unaffected and tests inject fakes).
 RecordDraft = Callable[[str, str, str], Any]       # (account_id, thread_id, draft_id) -> persist
-LookupDraft = Callable[[str, str], Optional[str]]  # (account_id, thread_id) -> existing draft id | None
+LookupDraft = Callable[[str, str], str | None]  # (account_id, thread_id) -> existing draft id | None
 # (account_id, thread_id, body, draft_id) -> persist the draft body for the feedback loop
 RecordOutcome = Callable[[str, str, str, str], Any]
 
@@ -96,9 +97,9 @@ RecordOutcome = Callable[[str, str, str, str], Any]
 def make_inbox_create_draft_handler(
     resolve_writer: ResolveWriter,
     *,
-    record_draft: Optional[RecordDraft] = None,
-    lookup_draft: Optional[LookupDraft] = None,
-    record_outcome: Optional[RecordOutcome] = None,
+    record_draft: RecordDraft | None = None,
+    lookup_draft: LookupDraft | None = None,
+    record_outcome: RecordOutcome | None = None,
 ):
     """Build the tool handler closure over an account->writer resolver.
 

@@ -16,8 +16,9 @@ from __future__ import annotations
 import logging
 import secrets
 import sqlite3
+from collections.abc import Callable
 from email.utils import getaddresses
-from typing import Any, Callable
+from typing import Any
 
 from . import db
 from .gmail import parse_message

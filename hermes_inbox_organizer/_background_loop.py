@@ -13,15 +13,17 @@ works only from a thread that is NOT the loop's own — hence a dedicated thread
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import threading
-from typing import Awaitable, TypeVar
+from collections.abc import Awaitable
+from typing import TypeVar
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-_instance: "BackgroundLoop | None" = None
+_instance: BackgroundLoop | None = None
 _lock = threading.Lock()
 
 
@@ -40,10 +42,8 @@ class BackgroundLoop:
         except Exception:  # pragma: no cover - daemon thread
             logger.exception("inbox background loop crashed")
         finally:
-            try:
+            with contextlib.suppress(Exception):  # pragma: no cover
                 self._loop.close()
-            except Exception:  # pragma: no cover
-                pass
 
     def run_coro_sync(self, coro: Awaitable[T], *, timeout: float = 120.0) -> T:
         if not self._loop.is_running():
@@ -59,7 +59,7 @@ async def _ensure_coro(awaitable: Awaitable[T]) -> T:
     return await awaitable
 
 
-def get_background_loop() -> "BackgroundLoop":
+def get_background_loop() -> BackgroundLoop:
     global _instance
     with _lock:
         if _instance is None:

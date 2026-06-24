@@ -12,7 +12,7 @@ import enum
 import sys
 import types
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 from hermes_inbox_organizer.notifier import (
     DeliveryNotifier,
@@ -22,12 +22,11 @@ from hermes_inbox_organizer.notifier import (
     _resolve_target,
 )
 
-
 # ── Fakes for the captured GatewayRunner + its DeliveryRouter ────────────────
 
 
 class _FakeRouter:
-    def __init__(self, result: Optional[dict] = None) -> None:
+    def __init__(self, result: dict | None = None) -> None:
         self.calls: list[tuple[str, list]] = []
         self._result = result if result is not None else {"x": {"success": True}}
 
@@ -39,7 +38,7 @@ class _FakeRouter:
 
 
 class _FakeGateway:
-    def __init__(self, result: Optional[dict] = None) -> None:
+    def __init__(self, result: dict | None = None) -> None:
         self.delivery_router = _FakeRouter(result)
         self._gateway_loop = object()
 
@@ -198,13 +197,13 @@ def _install_fake_gateway(monkeypatch):
     @dataclass
     class DeliveryTarget:
         platform: Any
-        chat_id: Optional[str] = None
-        thread_id: Optional[str] = None
+        chat_id: str | None = None
+        thread_id: str | None = None
         is_origin: bool = False
         is_explicit: bool = False
 
         @classmethod
-        def parse(cls, target: str, origin=None) -> "DeliveryTarget":
+        def parse(cls, target: str, origin=None) -> DeliveryTarget:
             parts = target.split(":", 2)
             return cls(
                 platform=Platform(parts[0].lower()),
@@ -271,7 +270,7 @@ def test_resolve_target_blank_is_none(monkeypatch):
 
 
 class _FakeHome:
-    def __init__(self, chat_id: str, thread_id: Optional[str] = None) -> None:
+    def __init__(self, chat_id: str, thread_id: str | None = None) -> None:
         self.chat_id = chat_id
         self.thread_id = thread_id
 

@@ -7,7 +7,7 @@ import re
 import pytest
 
 from hermes_inbox_organizer import db
-from hermes_inbox_organizer.brief import build_draft_brief, _EXAMPLE_BODY_CAP
+from hermes_inbox_organizer.brief import _EXAMPLE_BODY_CAP, build_draft_brief
 from hermes_inbox_organizer.config import reset_config
 from hermes_inbox_organizer.draft_trigger import DRAFT_TURN_SENTINEL
 

@@ -10,11 +10,11 @@ from .base import InboundEvent, Module, PeriodicJob, SentEvent, ToolSpec
 from .registry import InlineExecutor, ModuleRegistry
 
 __all__ = [
-    "Module",
     "InboundEvent",
+    "InlineExecutor",
+    "Module",
+    "ModuleRegistry",
+    "PeriodicJob",
     "SentEvent",
     "ToolSpec",
-    "PeriodicJob",
-    "ModuleRegistry",
-    "InlineExecutor",
 ]

@@ -13,7 +13,7 @@ decoupled from that wiring and unit-testable with fakes.
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from ..rollup import (
     INBOX_UNREAD_ROLLUP_SCHEMA,
@@ -50,9 +50,9 @@ class RollupModule(Module):
     def __init__(
         self,
         *,
-        resolve_accounts: Callable[[Optional[str]], dict],
+        resolve_accounts: Callable[[str | None], dict],
         is_auth_error: Callable[[Exception], bool],
-        classify: Optional[Callable[[dict], Optional[str]]] = None,
+        classify: Callable[[dict], str | None] | None = None,
     ) -> None:
         self._resolve_accounts = resolve_accounts
         self._is_auth_error = is_auth_error

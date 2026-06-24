@@ -25,7 +25,8 @@ import contextlib
 import json
 import logging
 import re
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 from .. import db
 from .base import InboundEvent, Module, PeriodicJob, ToolSpec
@@ -109,11 +110,11 @@ class ShippingModule(Module):
         self,
         *,
         notifier: Any,
-        client: Optional[Track17Client],
+        client: Track17Client | None,
         enabled: bool = True,
         max_active: int = 50,
         poll_interval_s: int = 4 * 3600,
-        db_connect: Optional[Callable[[], Any]] = None,
+        db_connect: Callable[[], Any] | None = None,
     ) -> None:
         self._notifier = notifier
         self._client = client
@@ -145,6 +146,8 @@ class ShippingModule(Module):
             self._register(event.account_id, num)
 
     def _register(self, account: str, number: str) -> None:
+        if self._client is None:
+            return
         try:
             result = self._client.register([number])
         except Exception:
@@ -162,6 +165,8 @@ class ShippingModule(Module):
 
     # -- poll + notify (periodic) -----------------------------------------------
     def poll_once(self) -> None:
+        if self._client is None:
+            return
         with contextlib.closing(self._db_connect()) as conn:
             rows = db.get_active_packages(conn)
         if not rows:

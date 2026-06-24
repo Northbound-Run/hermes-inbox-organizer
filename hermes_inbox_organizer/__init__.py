@@ -24,7 +24,7 @@ import logging
 import os
 import re
 import threading
-from typing import Any, Optional
+from typing import Any
 
 from .background import InboundMessage, InboxDaemon, NullSource
 from .draft_trigger import (
@@ -112,7 +112,7 @@ class _DraftTurnGuard:
         self._turns: dict[str, bool] = {}  # insertion-ordered; FIFO-evicted
         self._lock = threading.Lock()
 
-    def note(self, turn_id: Optional[str], user_message: Optional[str]) -> None:
+    def note(self, turn_id: str | None, user_message: str | None) -> None:
         if not turn_id or not user_message or DRAFT_TURN_SENTINEL not in user_message:
             return
         with self._lock:
@@ -120,12 +120,12 @@ class _DraftTurnGuard:
             while len(self._turns) > self._MAX:
                 self._turns.pop(next(iter(self._turns)))  # evict oldest (already completed)
 
-    def clear(self, turn_id: Optional[str]) -> None:
+    def clear(self, turn_id: str | None) -> None:
         if turn_id:
             with self._lock:
                 self._turns.pop(turn_id, None)
 
-    def blocked(self, turn_id: Optional[str], tool_name: Optional[str]) -> bool:
+    def blocked(self, turn_id: str | None, tool_name: str | None) -> bool:
         if not turn_id:
             return False
         with self._lock:
@@ -168,35 +168,35 @@ class _AuthContext:
 
     def __init__(self, owners: set[str]) -> None:
         self._owners = owners
-        self._last_sender: Optional[str] = None
+        self._last_sender: str | None = None
         self._by_session: dict[str, str] = {}
         self._lock = threading.Lock()
         self._tls = threading.local()
 
-    def note_sender(self, sender: Optional[str]) -> None:  # pre_gateway_dispatch
+    def note_sender(self, sender: str | None) -> None:  # pre_gateway_dispatch
         if sender:
             with self._lock:
                 self._last_sender = sender
 
-    def bind_session(self, session_id: Optional[str]) -> None:  # pre_llm_call
+    def bind_session(self, session_id: str | None) -> None:  # pre_llm_call
         if session_id:
             with self._lock:
                 if self._last_sender:
                     self._by_session[session_id] = self._last_sender
 
-    def sender_for(self, task_id: Optional[str]) -> Optional[str]:
+    def sender_for(self, task_id: str | None) -> str | None:
         if not task_id:
             return None
         with self._lock:
             return self._by_session.get(task_id)
 
-    def is_owner(self, sender: Optional[str]) -> bool:
+    def is_owner(self, sender: str | None) -> bool:
         return bool(sender) and sender in self._owners
 
-    def set_current(self, sender: Optional[str]) -> None:  # gate → handler (same thread)
+    def set_current(self, sender: str | None) -> None:  # gate → handler (same thread)
         self._tls.sender = sender
 
-    def current_sender(self) -> Optional[str]:
+    def current_sender(self) -> str | None:
         return getattr(self._tls, "sender", None)
 
 
@@ -508,7 +508,7 @@ def _build_modules(notifier: DeliveryNotifier) -> list:
     ]
 
 
-def _read_17track_key(cfg: Any) -> Optional[str]:
+def _read_17track_key(cfg: Any) -> str | None:
     """Read the 17track API key from the read-only config mount (None if absent)."""
     try:
         if os.path.exists(cfg.track17_key_file):
@@ -741,7 +741,7 @@ def _build_account(email: str):
 
     return Account(
         email=email,
-        build_service=(lambda e=email: service_from_token(_load_token_for(e))),
+        build_service=(lambda e=email: service_from_token(_load_token_for(e))),  # type: ignore[misc]  # default-arg capture; mypy can't infer the lambda
     )
 
 
@@ -809,7 +809,7 @@ def _run_account_backfill(account_id: str, force: bool = False) -> dict:
         )
 
 
-def _run_backfill(account_id: Optional[str], force: bool) -> dict:
+def _run_backfill(account_id: str | None, force: bool) -> dict:
     """Tool entry: backfill one account (``account_id``) or ALL connected accounts."""
     targets = [account_id] if account_id else sorted(_load_all_tokens())
     return {email: _run_account_backfill(email, force) for email in targets}
@@ -826,14 +826,14 @@ def _maybe_backfill_on_start() -> None:
     """Auto-run the backfill ONCE per account, off the hot path on a daemon thread.
 
     Guarded by an atomic ``note_once`` claim (NOT an empty-table check, so concurrent
-    threads / restarts can't double-spend). Gated on INBOX_BACKFILL_ON_START + an
-    OpenRouter key (the summarizer needs it).
+    threads / restarts can't double-spend). Gated on INBOX_BACKFILL_ON_START + a
+    classifier API key (the summarizer needs it).
     """
     from . import db
     from .config import get_config
 
     cfg = get_config()
-    if not cfg.backfill_on_start or not os.environ.get("OPENROUTER_API_KEY"):
+    if not cfg.backfill_on_start or not cfg.classifier_api_key:
         return
     for email in sorted(_load_all_tokens()):
         try:
@@ -927,7 +927,7 @@ def _managed_accounts() -> set[str]:
         return set()
 
 
-def _lookup_draft_id(account_id: str, thread_id: str) -> Optional[str]:
+def _lookup_draft_id(account_id: str, thread_id: str) -> str | None:
     """Existing Gmail draft id for a thread so a re-draft UPDATES instead of duplicating.
 
     Defensive: any failure resolves to None (treat as no existing draft → create),
@@ -996,7 +996,7 @@ def _resolve_reader(ctx: Any):
     return _resolve
 
 
-def _resolve_rollup_accounts(account_id: Optional[str]) -> dict:
+def _resolve_rollup_accounts(account_id: str | None) -> dict:
     """Resolve target mailboxes for the rollup -> {"accounts", "errors"}.
 
     Unlike ``_resolve_reader`` (which leans on ``_load_token_for``'s sole-account

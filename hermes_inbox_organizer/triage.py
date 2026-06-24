@@ -7,7 +7,8 @@ orchestration is unit-tested without an LLM or the agent.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 from . import db
 from .classifier import classify as _classify
@@ -28,9 +29,9 @@ def process_message(
     service: Any,
     label_ids: dict[str, str],
     classify_fn: ClassifyFn = _classify,
-    wake_fn: Optional[WakeFn] = None,
-    conn: Optional[Any] = None,
-    registry: Optional[Any] = None,
+    wake_fn: WakeFn | None = None,
+    conn: Any | None = None,
+    registry: Any | None = None,
 ) -> str:
     """Returns the bare category name applied to the message.
 

@@ -18,7 +18,6 @@ from hermes_inbox_organizer import db
 from hermes_inbox_organizer.modules import SentEvent
 from hermes_inbox_organizer.modules.draft_feedback import DraftFeedbackModule
 
-
 # ── fakes / factories ────────────────────────────────────────────────────────────
 
 def _cfg(**over):

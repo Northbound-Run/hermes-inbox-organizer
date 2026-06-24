@@ -9,7 +9,7 @@ without a real API call. Failures fall back to a safe "FYI".
 from __future__ import annotations
 
 import secrets
-from typing import Callable
+from collections.abc import Callable
 
 from . import llm
 from .labels import CLASSIFIER_CATEGORIES, category_by_name

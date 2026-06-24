@@ -7,6 +7,37 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-24
+
+### Added
+
+- **Setup wizard** — a `hermes-inbox-organizer` console script (also
+  `python -m hermes_inbox_organizer`, and `hermes inbox-organizer …`) with:
+  - `setup` — interactive wizard that writes the OAuth/Pub/Sub/service-account
+    config files into `INBOX_CONFIG_DIR`, auto-generates the AES encryption key
+    (never regenerates an existing one), and never echoes secrets; secret files
+    are written mode `0600`.
+  - `status` — reports what's configured and the resulting capabilities.
+- **`HERMES_SELF_INSTALL.md`** — an agent-executable runbook so a Hermes agent can
+  install + configure the plugin itself and walk the owner through Google Cloud.
+- **Any OpenAI-compatible classifier endpoint** — the classifier LLM is no longer
+  hardcoded to OpenRouter. Set `INBOX_CLASSIFIER_BASE_URL` + `INBOX_CLASSIFIER_API_KEY`
+  (e.g. a local vLLM/Ollama/LM Studio server or another gateway);
+  `OPENROUTER_API_KEY` is still accepted and remains the default.
+
+### Changed
+
+- README: a copy-paste **Quick Start** built around the `setup` wizard, an
+  **Updating** section, status badges, and backend-neutral owner-id wording (the
+  allowlist accepts any gateway `source.user_id`, not just Matrix).
+- **Adopted the shared [Hermes Plugin Standard](HERMES_PLUGIN_STANDARD.md)**:
+  full ruff ruleset (`E,F,I,W,UP,B,SIM,RUF`) + mypy type-checking with a shipped
+  `py.typed`; CI now runs lint + mypy and a 3.11–3.14 test matrix on
+  `actions/checkout@v5` / `setup-python@v6`, plus a build job that asserts the
+  packaged manifest/assets ship in the wheel; author set to
+  `Northbound <matthall28@gmail.com>`. (Line-length 100 is declared; a one-time
+  `ruff format` pass to enforce E501 is a tracked follow-up.)
+
 ## [0.1.0] - 2026-06-23
 
 First public release. Autonomous Gmail triage that loads into a
@@ -48,5 +79,6 @@ First public release. Autonomous Gmail triage that loads into a
   cursors, draft idempotency, classified messages, thread state, and draft
   outcomes/lessons. OAuth tokens are AES-256-GCM encrypted at rest.
 
-[Unreleased]: https://github.com/Northbound-Run/hermes-inbox-organizer/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Northbound-Run/hermes-inbox-organizer/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Northbound-Run/hermes-inbox-organizer/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Northbound-Run/hermes-inbox-organizer/releases/tag/v0.1.0

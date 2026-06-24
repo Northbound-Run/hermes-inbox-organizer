@@ -38,7 +38,7 @@ _REPLY_CUES = (
 )
 
 
-def _label_id(label_ids: dict[str, str], bare_name: str) -> "str | None":
+def _label_id(label_ids: dict[str, str], bare_name: str) -> str | None:
     cat = category_by_name(bare_name)
     return label_ids.get(label_name(cat)) if cat else None
 

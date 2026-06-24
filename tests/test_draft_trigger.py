@@ -49,11 +49,11 @@ def test_gateway_injection_builds_internal_event_and_dispatches() -> None:
     seen: dict = {}
 
     class FakeGateway:
-        async def _handle_message(self, event):  # noqa: ANN001
+        async def _handle_message(self, event):
             seen["event"] = event
             return "ok"
 
-    def make_event(instruction: str, source):  # noqa: ANN001
+    def make_event(instruction: str, source):
         return {"text": instruction, "source": source, "internal": True}
 
     def run_coro(coro):  # drive the coroutine to completion synchronously
@@ -118,7 +118,7 @@ def test_http_poster_uses_configured_timeout(monkeypatch) -> None:
         def __exit__(self, *a):
             return False
 
-    def fake_urlopen(req, timeout=None):  # noqa: ANN001
+    def fake_urlopen(req, timeout=None):
         captured["timeout"] = timeout
         return _Resp()
 

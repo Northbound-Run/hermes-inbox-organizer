@@ -22,7 +22,8 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,7 @@ def make_get_sender_profile_handler():
             return _err(f"profile lookup failed: {exc}")
         if row is None:
             return json.dumps({"profile": None, "sender_email": sender_email})
-        return json.dumps({"profile": {k: row[k] for k in row.keys()}})
+        return json.dumps({"profile": {k: row[k] for k in row}})  # type: ignore[literal-required]  # row is a dict-like Row; dynamic keys are fine
 
     return handler
 

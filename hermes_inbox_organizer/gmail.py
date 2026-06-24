@@ -13,7 +13,8 @@ dict (headers + plaintext body).
 from __future__ import annotations
 
 import base64
-from typing import Any, Callable, Optional, Protocol
+from collections.abc import Callable
+from typing import Any, Protocol
 
 
 def _b64url_decode(data: str) -> str:
@@ -96,17 +97,17 @@ class GmailReader(Protocol):
     def get_thread(self, thread_id: str) -> dict: ...
     def list_messages(self, query: str, max_results: int) -> list[dict]: ...
     def list_messages_page(
-        self, query: str, max_results: int, page_token: Optional[str] = None
+        self, query: str, max_results: int, page_token: str | None = None
     ) -> dict: ...
     def get_message(self, message_id: str, format: str = "full") -> dict: ...
     def list_labels(self) -> list[dict]: ...
 
 
 # Seam: account_id -> reader, or None when the account isn't connected yet.
-ResolveReader = Callable[[str], Optional[GmailReader]]
+ResolveReader = Callable[[str], GmailReader | None]
 
 
-def reader_from_token(tok: Any) -> "GoogleGmailReader":
+def reader_from_token(tok: Any) -> GoogleGmailReader:
     """Build a live reader from a stored AccountToken (auto-refreshing creds).
 
     Lazy google imports; needs the [live] deps installed. Not unit-tested.
@@ -149,7 +150,7 @@ class GoogleGmailReader:
         return resp.get("messages", []) or []
 
     def list_messages_page(
-        self, query: str, max_results: int, page_token: Optional[str] = None
+        self, query: str, max_results: int, page_token: str | None = None
     ) -> dict:
         """One page of a messages.list, raw envelope.
 
@@ -293,5 +294,5 @@ class GmailDraftWriter:
         return resp.get("id", draft_id)
 
 
-def writer_from_token(tok: Any) -> "GmailDraftWriter":
+def writer_from_token(tok: Any) -> GmailDraftWriter:
     return GmailDraftWriter(service_from_token(tok), tok.email)

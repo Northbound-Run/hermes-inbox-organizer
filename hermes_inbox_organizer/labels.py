@@ -42,7 +42,7 @@ def label_name(c: Category) -> str:
     return f"{c.sort_order}: {c.name}"
 
 
-def category_by_name(name: str) -> "Category | None":
+def category_by_name(name: str) -> Category | None:
     """Resolve a bare ("To Respond") or numbered ("1: To Respond") name."""
     bare = name.split(":", 1)[-1].strip() if ":" in name else name.strip()
     for c in CATEGORIES:

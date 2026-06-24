@@ -20,8 +20,9 @@ A module crash is always contained + logged, never propagated into triage.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, Optional
+from typing import Any
 
 from ..classifier import classify as _default_classify
 from ..labels import category_by_name
@@ -43,14 +44,14 @@ class InlineExecutor:
     def submit(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
         fn(*args, **kwargs)
 
-    def shutdown(self, wait: bool = True) -> None:  # noqa: D401 - parity shim
+    def shutdown(self, wait: bool = True) -> None:
         return None
 
 
 class ModuleRegistry:
     def __init__(
         self,
-        modules: Optional[list[Module]] = None,
+        modules: list[Module] | None = None,
         *,
         classify_fn: ClassifyFn = _default_classify,
         max_workers: int = 4,

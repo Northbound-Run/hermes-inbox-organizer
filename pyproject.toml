@@ -1,12 +1,12 @@
 [project]
 name = "hermes-inbox-organizer"
-version = "0.1.0"
+version = "0.2.0"
 description = "Autonomous Gmail triage as an in-process Hermes plugin"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
-authors = [{ name = "Matthew Hall", email = "matthew@hall.vc" }]
+authors = [{ name = "Northbound", email = "matthall28@gmail.com" }]
 keywords = [
   "gmail", "email", "triage", "inbox", "hermes", "hermes-agent",
   "plugin", "agent", "llm", "automation",
@@ -21,6 +21,7 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Communications :: Email",
   "Topic :: Office/Business :: Groupware",
 ]
@@ -37,7 +38,7 @@ live = [
   "google-auth-oauthlib>=1.0",  # InstalledAppFlow for `connect`
   "openai>=1.0",  # OpenRouter classifier client
 ]
-dev = ["pytest>=8.0", "ruff>=0.6"]
+dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.10"]
 
 [project.urls]
 Homepage = "https://github.com/Northbound-Run/hermes-inbox-organizer"
@@ -50,17 +51,49 @@ Documentation = "https://github.com/Northbound-Run/hermes-inbox-organizer/tree/m
 [project.entry-points."hermes_agent.plugins"]
 inbox_organizer = "hermes_inbox_organizer"
 
+# Standalone setup/status wizard: `hermes-inbox-organizer setup|status`
+# (also runnable as `python -m hermes_inbox_organizer`).
+[project.scripts]
+hermes-inbox-organizer = "hermes_inbox_organizer.cli:main"
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
 
 [tool.ruff]
+line-length = 100
 target-version = "py311"
 
+[tool.ruff.lint]
+# Shared ruleset across our Hermes plugins (see HERMES_PLUGIN_STANDARD.md §6).
+select = ["E", "F", "I", "W", "UP", "B", "SIM", "RUF"]
+# Pre-existing debt cleared by a future one-time `ruff format` + read_text() pass:
+#   E501  — line-length declared at 100 but not yet enforced on older code.
+#   SIM115 — `open(p).read()` key/JSON idioms (CPython-prompt-closed; no real leak).
+# Permanent:
+#   RUF002 — docstrings deliberately use × (multiplication) and – (en dash) prose.
+ignore = ["E501", "SIM115", "RUF002"]
+
 [tool.ruff.lint.per-file-ignores]
-# Tests deliberately use compact one-line statements (E702) and short throwaway
-# names like `l` (E741) for table-style cases; the package itself stays clean.
-"tests/*" = ["E702", "E741"]
+# Tests deliberately use compact one-line statements (E702), short throwaway names
+# like `l` (E741), blind exception asserts (B017), loop-var closures (B023), and
+# mutable class defaults in fakes (RUF012); the package itself stays clean.
+"tests/*" = ["E702", "E741", "B017", "B023", "RUF012"]
+
+[tool.mypy]
+files = ["hermes_inbox_organizer"]
+
+# Live/optional deps are lazily imported and ship no type stubs; don't fail on them.
+[[tool.mypy.overrides]]
+module = [
+  "google.*",
+  "googleapiclient.*",
+  "google_auth_oauthlib.*",
+  "gateway.*",
+  "fastapi.*",
+  "openai.*",
+]
+ignore_missing_imports = true
 
 [build-system]
 # setuptools>=77 for PEP 639 license metadata (`license = "MIT"` SPDX expression
@@ -79,6 +112,7 @@ include = ["hermes_inbox_organizer*"]
 # into $HERMES_HOME at runtime (see hermes_inbox_organizer.dashboard_assets).
 hermes_inbox_organizer = [
   "plugin.yaml",
+  "py.typed",
   "dashboard/manifest.json",
   "dashboard/plugin_api.py",
   "dashboard/dist/*",

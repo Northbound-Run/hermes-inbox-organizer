@@ -20,9 +20,9 @@ import base64
 import binascii
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ class NotificationDecodeError(ValueError):
     pass
 
 
-def decode_gmail_notification(data: "str | bytes") -> GmailNotification:
+def decode_gmail_notification(data: str | bytes) -> GmailNotification:
     """Decode a Gmail Pub/Sub notification into a GmailNotification.
 
     The streaming-pull client delivers the already-wire-decoded payload (raw JSON:
@@ -68,7 +68,7 @@ class Ack(Enum):
 
 
 # Seams (live impls supplied at wiring time):
-ResolveAccount = Callable[[str], Optional[str]]  # email -> account_id | None
+ResolveAccount = Callable[[str], str | None]  # email -> account_id | None
 PersistNotification = Callable[[str, GmailNotification], None]  # raises on failure
 Audit = Callable[[str, str], None]  # (event, detail)
 

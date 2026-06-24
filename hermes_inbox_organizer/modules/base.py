@@ -25,8 +25,9 @@ Gmail/Hermes mocking.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -60,7 +61,7 @@ class ToolSpec:
     handler: Callable[..., Any]
     description: str = ""
     toolset: str = "inbox"
-    emoji: Optional[str] = None
+    emoji: str | None = None
 
 
 @dataclass(frozen=True)
@@ -96,7 +97,7 @@ class Module:
         return True
 
     # -- decision phase (under the runtime lock — keep it cheap, no I/O) --------
-    def classify_override(self, parsed: dict) -> Optional[str]:
+    def classify_override(self, parsed: dict) -> str | None:
         """Return a bare category to override the default classifier, or None."""
         return None
 

@@ -82,7 +82,7 @@ def build_draft_brief(
         max_examples=cfg.draft_feedback_max_examples,
     )
     if learned:
-        parts += [""] + learned
+        parts += ["", *learned]
     if research:
         parts += [
             "",

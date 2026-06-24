@@ -19,8 +19,8 @@ import secrets
 import time
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional
 
 from .token_store import AccountToken
 
@@ -41,7 +41,7 @@ class OAuthClient:
     redirect_uri: str
 
 
-def load_oauth_client(path: Optional[str] = None) -> OAuthClient:
+def load_oauth_client(path: str | None = None) -> OAuthClient:
     """Load the Web OAuth client (client_id/secret/redirect_uri).
 
     Accepts our flat ``{client_id, client_secret, redirect_uri}`` shape or a
@@ -116,8 +116,8 @@ def exchange_code(
     *,
     code: str,
     code_verifier: str,
-    http_post: Optional[HttpPost] = None,
-    http_get: Optional[HttpGet] = None,
+    http_post: HttpPost | None = None,
+    http_get: HttpGet | None = None,
 ) -> AccountToken:
     """Exchange an auth code (+PKCE verifier) for a refresh token; return an AccountToken.
 
@@ -159,7 +159,7 @@ def exchange_code(
     )
 
 
-def revoke_token(refresh_token: str, *, http_post: Optional[HttpPost] = None) -> bool:
+def revoke_token(refresh_token: str, *, http_post: HttpPost | None = None) -> bool:
     """Best-effort revoke a refresh token at Google. Returns True on success.
 
     The revoke endpoint returns an empty 200 body, so this doesn't reuse the
@@ -204,12 +204,12 @@ class PendingStore:
         self._ttl = ttl_s
         self._by_state: dict[str, Pending] = {}
 
-    def create(self, *, sender: str, verifier: str, state: str, now: Optional[float] = None) -> None:
+    def create(self, *, sender: str, verifier: str, state: str, now: float | None = None) -> None:
         now = time.time() if now is None else now
         self._sweep(now)
         self._by_state[state] = Pending(sender=sender, verifier=verifier, state=state, created_at=now)
 
-    def take_for_sender(self, sender: str, *, now: Optional[float] = None) -> Optional[Pending]:
+    def take_for_sender(self, sender: str, *, now: float | None = None) -> Pending | None:
         """Consume + return the newest non-expired pending for ``sender`` (or None)."""
         now = time.time() if now is None else now
         self._sweep(now)
@@ -219,7 +219,7 @@ class PendingStore:
         chosen = max(candidates, key=lambda p: p.created_at)
         return self._by_state.pop(chosen.state, None)
 
-    def take_by_state(self, state: str, *, now: Optional[float] = None) -> Optional[Pending]:
+    def take_by_state(self, state: str, *, now: float | None = None) -> Pending | None:
         """Consume + return the pending for an exact ``state`` (or None if missing/expired)."""
         now = time.time() if now is None else now
         self._sweep(now)

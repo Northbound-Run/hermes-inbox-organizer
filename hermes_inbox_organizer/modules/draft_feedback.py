@@ -29,7 +29,8 @@ import contextlib
 import json
 import logging
 import time
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 from .. import db, draft_learn, llm
 from ..backfill import _recipients
@@ -61,7 +62,7 @@ class DraftFeedbackModule(Module):
         needs_reconnect: Callable[[], set],
         config: Any = None,
         classify_fn: Callable[[str, str], dict] = llm.classify_json,
-        db_connect: Optional[Callable[[], Any]] = None,
+        db_connect: Callable[[], Any] | None = None,
     ) -> None:
         self._cfg = config or get_config()
         self._resolve_accounts = resolve_accounts      # () -> managed account emails (M1)

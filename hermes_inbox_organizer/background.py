@@ -20,8 +20,9 @@ The Pub/Sub subscriber owns its own background thread, mirroring how the real
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from typing import Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ class InboundMessage:
 
 
 # A source pushes inbound messages to a callback (mirrors pubsub_v1.subscribe).
-OnMessage = Callable[[InboundMessage], None]
+OnMessage = Callable[[InboundMessage], object]  # return (a label, or None) is ignored by the source
 
 
 class MessageSource(Protocol):
@@ -50,7 +51,7 @@ class MessageSource(Protocol):
 class NullSource:
     """Inert source so ``daemon.start()`` is safe when unconfigured (tests/CI)."""
 
-    def start(self, on_message: OnMessage) -> None:  # noqa: D401
+    def start(self, on_message: OnMessage) -> None:
         return None
 
     def stop(self) -> None:

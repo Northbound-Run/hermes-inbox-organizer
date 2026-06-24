@@ -16,7 +16,6 @@ import pytest
 
 from hermes_inbox_organizer import db, draft_learn
 
-
 # ── fixtures / helpers ───────────────────────────────────────────────────────────
 
 @pytest.fixture()

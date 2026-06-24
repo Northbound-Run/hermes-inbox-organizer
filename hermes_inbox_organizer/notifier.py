@@ -54,7 +54,8 @@ modules that use it — are unit-tested without Hermes, mirroring
 from __future__ import annotations
 
 import logging
-from typing import Any, Awaitable, Callable, Optional, Protocol
+from collections.abc import Awaitable, Callable
+from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +172,7 @@ def _run_on_gateway_loop(coro: Awaitable[Any], gateway: Any, timeout: float) -> 
         from ._background_loop import get_background_loop
 
         return get_background_loop().run_coro_sync(coro, timeout=timeout)
-    return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=timeout)
+    return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=timeout)  # type: ignore[arg-type]  # callers pass a real coroutine
 
 
 def _delivery_ok(results: Any) -> bool:
@@ -215,7 +216,7 @@ class DeliveryNotifier:
         self,
         *,
         get_gateway: Callable[[], Any],
-        target: Optional[str] = None,
+        target: str | None = None,
         get_source: Callable[[], Any] = lambda: None,
         default_platform: str = DEFAULT_PLATFORM,
         timeout_s: float = DEFAULT_TIMEOUT_S,

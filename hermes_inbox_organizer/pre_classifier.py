@@ -48,7 +48,7 @@ def has_unsubscribe_signal(parsed: dict) -> bool:
     return bool(_UNSUB_BODY_RE.search(parsed.get("body") or parsed.get("snippet") or ""))
 
 
-def pre_classify(parsed: dict) -> "str | None":
+def pre_classify(parsed: dict) -> str | None:
     """Return a bare category name if a rule matches, else None (→ LLM)."""
     # Before the noreply rule: a no-reply marketing blast is Marketing, not a
     # generic Notification.

@@ -9,7 +9,8 @@ clear "account not connected" message rather than failing.
 from __future__ import annotations
 
 import json
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from .gmail import ResolveReader, parse_message
 

@@ -35,7 +35,8 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from typing import Any, Awaitable, Callable, Protocol
+from collections.abc import Awaitable, Callable
+from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -224,7 +225,7 @@ class HttpMessagePoster:
         # A full draft turn (read thread + compose + drafts.create) can take well
         # over a minute; keep the timeout generous so we don't abandon a turn the
         # agent is still completing server-side.
-        with urllib.request.urlopen(req, timeout=self._timeout) as resp:  # noqa: S310 localhost
+        with urllib.request.urlopen(req, timeout=self._timeout) as resp:
             return {"status": resp.status, "body": resp.read().decode()}
 
 
@@ -263,8 +264,8 @@ def wake_draft(
     thread_id: str,
     sender: str = "",
     subject: str = "",
-    instruction: "str | None" = None,
-    poster: "MessagePoster | None" = None,
+    instruction: str | None = None,
+    poster: MessagePoster | None = None,
 ) -> bool:
     """Autonomous draft trigger: POST a drafting task to the local Hermes api_server.
 

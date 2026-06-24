@@ -14,7 +14,8 @@ JSON **string**, and never raise.
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 from . import oauth
 from .token_store import AccountToken
@@ -60,7 +61,7 @@ INBOX_DISCONNECT_ACCOUNT_SCHEMA: dict[str, Any] = {
 }
 
 # Seams resolved in __init__ at register() time.
-ResolveSender = Callable[[], Optional[str]]
+ResolveSender = Callable[[], str | None]
 SaveToken = Callable[[AccountToken], None]
 HotAdd = Callable[[AccountToken], bool]
 Exchange = Callable[..., AccountToken]
@@ -143,7 +144,7 @@ def make_onboarding_tools(
 def make_disconnect_tool(
     *,
     resolve_sender: ResolveSender,
-    load_token: Callable[[str], Optional[AccountToken]],
+    load_token: Callable[[str], AccountToken | None],
     delete_token: Callable[[str], bool],
     remove_account: Callable[[str], bool],
     revoke: Callable[[str], bool] = oauth.revoke_token,

@@ -23,7 +23,8 @@ from __future__ import annotations
 import difflib
 import logging
 import sqlite3
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 from . import db, llm
 from .backfill import _fenced
@@ -86,7 +87,7 @@ def score_similarity(a: str, b: str) -> int:
     b = (b or "")[:BODY_CAP]
     if not a and not b:
         return 100
-    return int(round(difflib.SequenceMatcher(None, a, b).ratio() * 100))
+    return round(difflib.SequenceMatcher(None, a, b).ratio() * 100)
 
 
 def classify_outcome(
@@ -121,7 +122,7 @@ def _is_trivial_edit(draft_body: str, sent_body: str, similarity: int) -> bool:
     return delta <= TRIVIAL_ABS_DELTA
 
 
-def _clip(text: Optional[str], limit: int) -> str:
+def _clip(text: str | None, limit: int) -> str:
     return (text or "").strip()[:limit]
 
 

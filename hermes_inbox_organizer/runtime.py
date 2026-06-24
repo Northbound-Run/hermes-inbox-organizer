@@ -14,8 +14,9 @@ import logging
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any
 
 from . import db
 from .config import get_config
@@ -78,7 +79,7 @@ def _is_auth_error(exc: Exception) -> bool:
     if status is None:
         status = getattr(exc, "status_code", None)
     try:
-        return int(status) in (401, 403)
+        return int(status) in (401, 403)  # type: ignore[arg-type]  # status is Any|None; except handles non-ints
     except (TypeError, ValueError):
         return False
 
@@ -108,14 +109,14 @@ class InboxRuntime:
         topic: str,
         subscription: str,
         sa_key_path: str,
-        classify_fn: Optional[Callable[[dict], str]] = None,
-        wake_fn: Optional[Callable[..., Any]] = None,
-        db_path: Optional[str] = None,
-        on_auth_failure: Optional[Callable[[str], None]] = None,
-        registry: Optional[Any] = None,
-        list_account_fingerprints: Optional[Callable[[], dict[str, str]]] = None,
-        build_account: Optional[Callable[[str], "Account"]] = None,
-        on_account_added: Optional[Callable[[str], None]] = None,
+        classify_fn: Callable[[dict], str] | None = None,
+        wake_fn: Callable[..., Any] | None = None,
+        db_path: str | None = None,
+        on_auth_failure: Callable[[str], None] | None = None,
+        registry: Any | None = None,
+        list_account_fingerprints: Callable[[], dict[str, str]] | None = None,
+        build_account: Callable[[str], Account] | None = None,
+        on_account_added: Callable[[str], None] | None = None,
     ) -> None:
         self._accounts = list(accounts)
         self._by_email = {a.email: a for a in self._accounts}
@@ -435,15 +436,14 @@ class InboxRuntime:
             acct, tid = row["account"], row["thread_id"]
             sender, subject = row["from_addr"] or "", row["subject"] or ""
             instruction = None
-            with self._lock:
-                with contextlib.closing(self._db()) as conn:
-                    won = db.claim_draft(
-                        conn, acct, tid, from_addr=sender, subject=subject,
-                        ttl_ms=RETRY_TTL_MS, max_attempts=MAX_DRAFT_ATTEMPTS, now_ms=db.now_ms(),
-                    )
-                    if not won:
-                        continue  # another dispatch path just handled it
-                    instruction = self._build_brief(conn, acct, tid, sender, subject)
+            with self._lock, contextlib.closing(self._db()) as conn:
+                won = db.claim_draft(
+                    conn, acct, tid, from_addr=sender, subject=subject,
+                    ttl_ms=RETRY_TTL_MS, max_attempts=MAX_DRAFT_ATTEMPTS, now_ms=db.now_ms(),
+                )
+                if not won:
+                    continue  # another dispatch path just handled it
+                instruction = self._build_brief(conn, acct, tid, sender, subject)
             self._wake_fn(
                 account_id=acct, thread_id=tid, sender=sender, subject=subject, instruction=instruction
             )

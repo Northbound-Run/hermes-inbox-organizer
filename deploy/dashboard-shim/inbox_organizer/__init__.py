@@ -30,6 +30,6 @@ from __future__ import annotations
 
 # Re-exported so the directory is a valid, loadable plugin if it is ever the
 # dedup winner. Dormant under normal operation (the entry-point wins).
-from hermes_inbox_organizer import register  # noqa: F401
+from hermes_inbox_organizer import register
 
 __all__ = ["register"]

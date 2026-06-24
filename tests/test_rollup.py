@@ -10,8 +10,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-
-
 # ---------------------------------------------------------------------------
 # Fake GmailReader — records every call so tests can assert read-only
 # ---------------------------------------------------------------------------
@@ -720,7 +718,7 @@ def test_auth_failure_account_error_does_not_abort_other() -> None:
 
 def test_auth_failure_adds_to_needs_reconnect_set() -> None:
     """Auth error adds the email to _NEEDS_RECONNECT (tested via rollup import)."""
-    from hermes_inbox_organizer.rollup import build_rollup, _NEEDS_RECONNECT
+    from hermes_inbox_organizer.rollup import _NEEDS_RECONNECT, build_rollup
 
     _NEEDS_RECONNECT.discard("reconnect@example.com")  # clean state
 

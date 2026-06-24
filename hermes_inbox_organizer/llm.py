@@ -1,29 +1,36 @@
-"""Minimal OpenRouter LLM client for classification (the cheap local path).
+"""Minimal OpenAI-compatible LLM client for classification (the cheap local path).
 
-Uses the OpenAI SDK pointed at OpenRouter and reads OPENROUTER_API_KEY from the
-environment (provided by the Hermes container). Lazy import so the
-package loads without the openai lib. The model defaults to a small, cheap,
-instruction-following model and is overridable via INBOX_CLASSIFIER_MODEL.
+Defaults to OpenRouter but works with **any OpenAI-compatible endpoint**: set
+``INBOX_CLASSIFIER_BASE_URL`` and ``INBOX_CLASSIFIER_API_KEY`` (the key falls back
+to ``OPENROUTER_API_KEY`` for back-compat). The model defaults to a small, cheap,
+instruction-following model and is overridable via ``INBOX_CLASSIFIER_MODEL``.
+All three resolve through :mod:`.config`. The ``openai`` SDK is imported lazily so
+the package loads without it.
 """
 
 from __future__ import annotations
 
 import json
-import os
 
-DEFAULT_MODEL = os.environ.get("INBOX_CLASSIFIER_MODEL", "google/gemini-2.5-flash-lite")
+from .config import get_config
 
 
-def classify_json(system: str, user: str, *, model: "str | None" = None) -> dict:
-    """Call the model with a JSON-object response format; return the parsed dict."""
+def _client():
+    """Build an OpenAI client for the configured (OpenAI-compatible) endpoint."""
     from openai import OpenAI
 
-    client = OpenAI(
-        api_key=os.environ["OPENROUTER_API_KEY"],
-        base_url="https://openrouter.ai/api/v1",
-    )
-    resp = client.chat.completions.create(
-        model=model or DEFAULT_MODEL,
+    cfg = get_config()
+    if not cfg.classifier_api_key:
+        raise RuntimeError(
+            "no classifier API key — set INBOX_CLASSIFIER_API_KEY (or OPENROUTER_API_KEY)"
+        )
+    return OpenAI(api_key=cfg.classifier_api_key, base_url=cfg.classifier_base_url)
+
+
+def classify_json(system: str, user: str, *, model: str | None = None) -> dict:
+    """Call the model with a JSON-object response format; return the parsed dict."""
+    resp = _client().chat.completions.create(
+        model=model or get_config().classifier_model,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -34,20 +41,14 @@ def classify_json(system: str, user: str, *, model: "str | None" = None) -> dict
     return json.loads(resp.choices[0].message.content or "{}")
 
 
-def summarize(system: str, user: str, *, model: "str | None" = None) -> str:
+def summarize(system: str, user: str, *, model: str | None = None) -> str:
     """Plain-text completion (mirrors :func:`classify_json` but returns the raw string).
 
     Used by the sender-profile backfill to distil the owner's voice from their own
     sent prose. Temperature 0 for stable, terse output.
     """
-    from openai import OpenAI
-
-    client = OpenAI(
-        api_key=os.environ["OPENROUTER_API_KEY"],
-        base_url="https://openrouter.ai/api/v1",
-    )
-    resp = client.chat.completions.create(
-        model=model or DEFAULT_MODEL,
+    resp = _client().chat.completions.create(
+        model=model or get_config().classifier_model,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},

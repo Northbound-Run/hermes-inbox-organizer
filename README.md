@@ -43,6 +43,31 @@ dashboard for connecting/removing accounts ([docs/dashboard.md](docs/dashboard.m
   `inbox_connect_account` / `inbox_complete_connection` / `inbox_disconnect_account`,
   `inbox_draft_feedback_status`, `inbox_forget_lesson`, `inbox_clear_learned_notes`
 
+## Quick Start
+
+You need a **Hermes deployment you control** and a **Google Cloud project**
+(a one-time setup in your browser). Then:
+
+```sh
+# 1) Install (pip — this plugin needs the Gmail/Pub/Sub deps)
+pip install "hermes-inbox-organizer[live]"
+hermes plugins enable inbox_organizer
+
+# 2) One-time Google Cloud setup (OAuth client + Pub/Sub)
+#    → docs/google-bootstrap.md  (~10 min, in your browser)
+
+# 3) Configure — the wizard writes the config files + keys
+#    (auto-generates the encryption key; never prints secrets)
+hermes-inbox-organizer setup
+hermes-inbox-organizer status      # what's configured + capabilities
+
+# 4) Restart Hermes, then in chat: "connect a Gmail account"
+```
+
+Already run a Hermes agent? Hand it
+[`HERMES_SELF_INSTALL.md`](HERMES_SELF_INSTALL.md) and it'll do all of this for
+you. The full detail and the by-hand path are under [Install](#install).
+
 ## How it works
 
 - **Load**: `register(ctx)` registers the agent tools + a `pre_llm_call` nudge
@@ -61,6 +86,9 @@ dashboard for connecting/removing accounts ([docs/dashboard.md](docs/dashboard.m
   fraction of a cent.
 
 ## Install
+
+The [Quick Start](#quick-start) is the short version; this is the full detail,
+including the by-hand config path if you'd rather not use the `setup` wizard.
 
 This is a **pip / entry-point Hermes plugin** — it ships the
 `hermes_agent.plugins` entry point and your Hermes agent loads it in-process. It
@@ -127,7 +155,21 @@ The plugin reads its secrets as **files** from a config dir
 (`INBOX_CONFIG_DIR`, default `/opt/data/config`) and writes its SQLite DB +
 encrypted tokens to a data dir (`INBOX_DATA_DIR`, default
 `/opt/data/inbox-organizer`). Point both env vars at real paths if those
-defaults don't fit your host, then install these files into `INBOX_CONFIG_DIR`:
+defaults don't fit your host.
+
+**Easiest — the setup wizard.** It prompts for the values from step 1, generates
+the encryption key, and writes everything into `INBOX_CONFIG_DIR` (mode `0600`):
+
+```sh
+hermes-inbox-organizer setup     # or: python -m hermes_inbox_organizer setup
+hermes-inbox-organizer status    # verify what's configured + capabilities
+```
+
+The wizard writes env-only values (the classifier API key + endpoint, optional
+`HERMES_API_URL`) to `INBOX_CONFIG_DIR/inbox.env` for you to wire into the Hermes
+environment (e.g. a compose `env_file:`).
+
+**Or by hand** — install these files into `INBOX_CONFIG_DIR`:
 
 | File | Contents |
 |---|---|
@@ -136,11 +178,24 @@ defaults don't fit your host, then install these files into `INBOX_CONFIG_DIR`:
 | `inbox-pubsub-sa.json` | the `pubsub.subscriber` service-account key (step 1.7) |
 | `inbox-encryption-key` | 32 hex bytes — `openssl rand -hex 32` (AES-GCM for tokens at rest) |
 
+`owner_matrix_ids` is the **owner allowlist** for the connect/disconnect tools —
+gateway sender ids, **not** Matrix-only despite the name (use whatever
+`source.user_id` your channel reports). You can instead set it via
+`INBOX_OWNER_MATRIX_IDS` (comma-separated), which takes precedence. The gate is
+fail-closed: with neither set, even the owner can't connect a mailbox. Proactive
+module pushes (2FA, shipping) go to your Hermes `/sethome` home channel on
+whatever platform you use.
+
 And in the Hermes environment:
 
-- `OPENROUTER_API_KEY` — the classifier LLM
-  ([openrouter.ai/keys](https://openrouter.ai/keys)); most Hermes setups already
-  have one.
+- **Classifier LLM** — the classifier speaks the OpenAI API, so it works with
+  **any compatible endpoint**. By default it uses OpenRouter via
+  `OPENROUTER_API_KEY` ([openrouter.ai/keys](https://openrouter.ai/keys); most
+  Hermes setups already have one). For any other endpoint — a local
+  vLLM/Ollama/LM Studio server, or another gateway — set `INBOX_CLASSIFIER_API_KEY`
+  and `INBOX_CLASSIFIER_BASE_URL` instead, and optionally `INBOX_CLASSIFIER_MODEL`
+  (default `google/gemini-2.5-flash-lite`). `INBOX_CLASSIFIER_API_KEY` takes
+  precedence over `OPENROUTER_API_KEY`.
 - `HERMES_API_URL` *(optional)* — the Hermes OpenAI-compatible endpoint, needed
   only for the drafted replies; triage + labeling run without it.
 
@@ -164,6 +219,7 @@ Two ways — same copy-paste OAuth either way:
 ### Verify
 
 ```sh
+hermes-inbox-organizer status                # config + capabilities at a glance
 hermes plugins list                          # inbox_organizer → enabled
 HERMES_PLUGINS_DEBUG=1 hermes plugins list   # verbose discovery if it doesn't show up
 ```
@@ -175,6 +231,16 @@ label within seconds (push) or a few minutes (the polling reconciler).
 > **Deploying into a baked container image** (the daemon up at boot, secrets in a
 > read-only mount)? That's how this repo's own stack runs — see
 > [docs/setup.md](docs/setup.md) for the Dockerfile + entrypoint wiring.
+
+## Updating
+
+```sh
+pip install --upgrade "hermes-inbox-organizer[live]"
+```
+
+Then restart Hermes (or `/reset` in a CLI session) so the updated tools + schemas
+reload. The SQLite schema migrates in place on load, so cursors, tokens, and
+learned drafting state carry over; run `hermes-inbox-organizer status` to confirm.
 
 ## Layout
 
@@ -189,8 +255,14 @@ label within seconds (push) or a few minutes (the polling reconciler).
 
 ```sh
 uv venv && uv pip install -e ".[dev]"
-.venv/bin/python -m pytest -q
+.venv/bin/python -m pytest -q     # tests run fully offline (network/Google/agent are seamed)
+ruff check .                      # lint
+mypy                              # type-check
 ```
+
+This plugin follows the shared [Hermes Plugin Standard](HERMES_PLUGIN_STANDARD.md)
+(packaging, tooling, CI, release, and security conventions used across our Hermes
+plugins). See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR.
 
 ## License
 

@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ def packaged_dashboard_dir() -> str:
     return os.path.join(os.path.dirname(__file__), "dashboard")
 
 
-def project(home: Optional[str] = None) -> Optional[str]:
+def project(home: str | None = None) -> str | None:
     """Copy the packaged ``dashboard/`` into ``<home>/plugins/inbox_organizer/``.
 
     Returns the destination ``dashboard/`` path, or ``None`` if the assets are
@@ -85,6 +85,8 @@ def project(home: Optional[str] = None) -> Optional[str]:
 def setup_cli(subparser: Any) -> None:
     """Build the argparse tree for ``hermes inbox-organizer``."""
     subs = subparser.add_subparsers(dest="inbox_command")
+    subs.add_parser("setup", help="Interactive wizard: write the plugin config files + keys")
+    subs.add_parser("status", help="Show what's configured and the resulting capabilities")
     subs.add_parser(
         "install-dashboard",
         help="(Re)install the dashboard UI into $HERMES_HOME/plugins (then restart `hermes dashboard`)",
@@ -94,7 +96,16 @@ def setup_cli(subparser: Any) -> None:
 
 def cli_handler(args: Any) -> None:
     """Handler for ``hermes inbox-organizer <subcommand>``."""
-    if getattr(args, "inbox_command", None) == "install-dashboard":
+    cmd = getattr(args, "inbox_command", None)
+    if cmd == "setup":
+        from .cli import cmd_setup
+
+        cmd_setup(args)
+    elif cmd == "status":
+        from .cli import cmd_status
+
+        cmd_status(args)
+    elif cmd == "install-dashboard":
         dest = project()
         if dest:
             print(f"inbox-organizer: dashboard installed → {dest}")
@@ -102,4 +113,4 @@ def cli_handler(args: Any) -> None:
         else:
             print("inbox-organizer: dashboard projection failed (see logs)")
     else:
-        print("Usage: hermes inbox-organizer install-dashboard")
+        print("Usage: hermes inbox-organizer {setup|status|install-dashboard}")

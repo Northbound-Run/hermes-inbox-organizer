@@ -20,7 +20,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -37,18 +36,20 @@ class Config:
     sa_key_file: str
     pubsub_config_file: str
     # OAuth / onboarding
-    oauth_redirect_uri: Optional[str]
+    oauth_redirect_uri: str | None
     owner_matrix_ids: frozenset
     # LLM / wake
     classifier_model: str
-    wake_model: Optional[str]
-    hermes_api_url: Optional[str]
-    api_server_key: Optional[str]
+    classifier_base_url: str  # INBOX_CLASSIFIER_BASE_URL (any OpenAI-compatible endpoint; default OpenRouter)
+    classifier_api_key: str | None  # INBOX_CLASSIFIER_API_KEY, falling back to OPENROUTER_API_KEY
+    wake_model: str | None
+    hermes_api_url: str | None
+    api_server_key: str | None
     wake_timeout_s: int  # INBOX_WAKE_TIMEOUT_S (wake POST timeout; default 300)
     draft_research_enabled: bool  # INBOX_DRAFT_RESEARCH (brief encourages research; default on)
     # Notifications (proactive push to the owner — see notifier.py).
     # OPTIONAL override; default destination is Hermes's /sethome home channel.
-    notify_target: Optional[str]  # INBOX_NOTIFY_TARGET: a room/chat id, e.g. "!room:server"
+    notify_target: str | None  # INBOX_NOTIFY_TARGET: a room/chat id, e.g. "!room:server"
     # Core label system (the 8 numbered labels + archiving). Off = the plugin
     # never mutates the mailbox: no label creation/apply, no archiving, no
     # sent-handler thread moves. Classification, DB persistence, module
@@ -81,7 +82,7 @@ class Config:
         return os.path.join(self.token_dir, f"{safe_email}.json")
 
 
-def _env(name: str) -> Optional[str]:
+def _env(name: str) -> str | None:
     val = os.environ.get(name)
     return val if val else None
 
@@ -127,6 +128,8 @@ def get_config() -> Config:
         oauth_redirect_uri=_env("INBOX_OAUTH_REDIRECT_URI"),
         owner_matrix_ids=frozenset(owners),
         classifier_model=os.environ.get("INBOX_CLASSIFIER_MODEL", "google/gemini-2.5-flash-lite"),
+        classifier_base_url=os.environ.get("INBOX_CLASSIFIER_BASE_URL", "https://openrouter.ai/api/v1"),
+        classifier_api_key=_env("INBOX_CLASSIFIER_API_KEY") or _env("OPENROUTER_API_KEY"),
         wake_model=_env("INBOX_WAKE_MODEL"),
         hermes_api_url=_env("HERMES_API_URL"),
         api_server_key=_env("API_SERVER_KEY"),

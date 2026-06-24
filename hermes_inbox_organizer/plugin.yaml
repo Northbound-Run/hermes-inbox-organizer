@@ -35,13 +35,21 @@ provides_hooks:
 # docs/setup.md.
 requires_env:
   - name: OPENROUTER_API_KEY
-    description: "OpenRouter API key for the local classifier LLM (most Hermes setups already have one)."
+    description: "Classifier LLM API key. OpenRouter by default; for any other OpenAI-compatible endpoint set INBOX_CLASSIFIER_API_KEY + INBOX_CLASSIFIER_BASE_URL instead."
     url: "https://openrouter.ai/keys"
     secret: true
 
-# Only needed for Hermes-drafted replies (the wake → draft trigger). Triage and
-# labeling run fine without these.
+# The classifier speaks the OpenAI API, so it works with any compatible endpoint.
+# Drafting (the wake → draft trigger) needs HERMES_API_URL; triage + labeling run
+# without it.
 optional_env:
+  - name: INBOX_CLASSIFIER_API_KEY
+    description: "Classifier LLM API key for any OpenAI-compatible endpoint (takes precedence over OPENROUTER_API_KEY)."
+    secret: true
+  - name: INBOX_CLASSIFIER_BASE_URL
+    description: "OpenAI-compatible base URL for the classifier (default https://openrouter.ai/api/v1)."
+  - name: INBOX_CLASSIFIER_MODEL
+    description: "Classifier model id (default google/gemini-2.5-flash-lite)."
   - name: HERMES_API_URL
     description: "Base URL of the local Hermes OpenAI-compatible endpoint; without it, drafting is skipped (classification/labeling still run)."
   - name: API_SERVER_KEY
